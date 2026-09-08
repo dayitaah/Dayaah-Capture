@@ -4,7 +4,7 @@
   <img src="assets/dayaah-capture-icon.png" width="180" alt="Dayaah Capture">
 </p>
 
-<h1 align="center">Dayaah Capture</h1>
+<h1 align="center">Dayaah Capture -- Ultra-Low-Latency Capture Preview for Windows</h1>
 
 <p align="center">
   Native ultra-low-latency HDMI capture preview for Windows.
