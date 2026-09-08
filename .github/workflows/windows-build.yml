@@ -1,0 +1,28 @@
+name: Windows build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Configure MSVC and build
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          call build.bat
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dayaah-Capture-Windows-x64
+          path: build/DayaahCapture.exe
+          if-no-files-found: error
