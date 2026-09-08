@@ -1,0 +1,20 @@
+name: Feature request
+description: Suggest an improvement compatible with the project's low-latency focus.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Suggestions may be written in English or Spanish.
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Explain what you would add and which problem it would solve.
+    validations:
+      required: true
+  - type: textarea
+    id: latency
+    attributes:
+      label: Expected impact
+      description: If known, describe the possible impact on latency, compatibility, or complexity.
