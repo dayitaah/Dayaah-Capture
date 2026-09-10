@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://dayitaah.github.io/Dayaah-Capture/sitemap.xml
