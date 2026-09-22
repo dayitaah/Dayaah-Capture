@@ -1,5 +1,7 @@
 # Dayaah Capture 1.1.3
 
+**English** | [Español](README-ES.md)
+
 Native, ultra-low-latency HDMI capture-card preview for Windows 10/11 x64.
 No MPV, FFmpeg or installation required.
 
@@ -18,6 +20,7 @@ No MPV, FFmpeg or installation required.
 - `Esc` is non-destructive: it only leaves fullscreen or restores a maximized
   window. It never stops video or audio.
 - Added vertical room to the initial setup window.
+
 
 ## Features
 
