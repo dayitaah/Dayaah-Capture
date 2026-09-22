@@ -182,7 +182,12 @@ Los reportes y mejoras son bienvenidos en inglés o español. Consulta
 ## Apoyar Dayaah Capture
 
 Si Dayaah Capture te salvó del infierno de la latencia, puedes apoyar su
-desarrollo en [Ko-fi](https://ko-fi.com/dayaah).
+desarrollo en Ko-fi:
+
+<p>
+  <a href="https://ko-fi.com/dayaah"><img alt="Apoyar a Dayaah en Ko-fi" src="https://img.shields.io/badge/Apoyar%20a%20Dayaah-Ko--fi-FF5E5B?logo=kofi&logoColor=white"></a>
+</p>
+
 
 ## Licencia
 
