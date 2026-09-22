@@ -1,5 +1,20 @@
+<p align="right"><a href="README.md">English</a> · <strong>Español</strong></p>
+
 <p align="center">
-  <img src="assets/dayaah-capture-header-icon.png" alt="Dayaah Capture" width="120">
+  <img src="assets/dayaah-capture-icon.png" width="180" alt="Dayaah Capture">
+</p>
+
+<h1 align="center">Dayaah Capture</h1>
+
+<p align="center">
+  Vista previa nativa y de latencia ultrabaja para capturadoras HDMI en Windows.
+</p>
+
+<p align="center">
+  <img alt="Versión 1.0" src="https://img.shields.io/badge/versión-1.0-53D7B2">
+  <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
+  <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
+  <img alt="Licencia MIT" src="https://img.shields.io/badge/licencia-MIT-53D7B2">
 </p>
 
 # Dayaah Capture
