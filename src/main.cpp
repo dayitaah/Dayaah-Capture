@@ -34,6 +34,7 @@
 #include <deque>
 #include <string>
 #include <vector>
+#include "window_behavior.h"
 
 static const PROPERTYKEY kPkeyDeviceFriendlyName = {
     {0xA45C254E, 0xDF1C, 0x4EFD, {0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, 14
@@ -761,8 +762,10 @@ class DayaahApp {
 public:
     DayaahApp() { InitializeCriticalSection(&frameLock_); }
     ~DayaahApp() {
+        SetCaptureCursorHidden(false);
         StopCapture();
         ReleaseDevices();
+        if (hiddenCursor_) DestroyCursor(hiddenCursor_);
         DeleteCriticalSection(&frameLock_);
         SafeRelease(audioEnumerator_);
         MFShutdown();
@@ -783,12 +786,22 @@ public:
         INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
         InitCommonControlsEx(&controls);
 
+        visibleCursor_ = LoadCursorW(nullptr, IDC_ARROW);
+        BYTE andMask[32 * 32 / 8];
+        BYTE xorMask[32 * 32 / 8]{};
+        memset(andMask, 0xFF, sizeof(andMask));
+        hiddenCursor_ = CreateCursor(instance_, 0, 0, 32, 32, andMask, xorMask);
+        if (!visibleCursor_ || !hiddenCursor_) {
+            const DWORD error = GetLastError();
+            return HRESULT_FROM_WIN32(error ? error : ERROR_INVALID_HANDLE);
+        }
+
         WNDCLASSEXW windowClass{};
         windowClass.cbSize = sizeof(windowClass);
         windowClass.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
         windowClass.lpfnWndProc = WindowProc;
         windowClass.hInstance = instance_;
-        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hCursor = visibleCursor_;
         windowClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(101));
         windowClass.hbrBackground = CreateSolidBrush(RGB(10, 13, 18));
         windowClass.lpszClassName = L"DayaahCaptureWindow";
@@ -799,9 +812,9 @@ public:
                                                             LR_DEFAULTCOLOR));
         if (!RegisterClassExW(&windowClass)) return HRESULT_FROM_WIN32(GetLastError());
 
-        window_ = CreateWindowExW(0, windowClass.lpszClassName, L"Dayaah Capture",
+        window_ = CreateWindowExW(0, windowClass.lpszClassName, L"Dayaah Capture 1.1.3",
                                   WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                                  860, 600, nullptr, nullptr, instance_, this);
+                                  860, 630, nullptr, nullptr, instance_, this);
         if (!window_) return HRESULT_FROM_WIN32(GetLastError());
 
         BOOL dark = TRUE;
@@ -878,12 +891,9 @@ public:
 
         EnterCriticalSection(&frameLock_);
         latestFrame_.swap(incoming);
-        latestSerial_++;
         LeaveCriticalSection(&frameLock_);
         receivedFrames_++;
-        if (InterlockedCompareExchange(&frameMessagePending_, 1, 0) == 0) {
-            PostMessageW(window_, WM_DAYAAH_FRAME, 0, 0);
-        }
+        if (frameReadyEvent_) SetEvent(frameReadyEvent_);
     }
 
     void ContinueReading() {
@@ -919,50 +929,79 @@ private:
         switch (message) {
         case WM_COMMAND:
             return OnCommand(LOWORD(wParam), HIWORD(wParam));
-        case WM_DAYAAH_FRAME:
-            RenderLatestFrame();
-            return 0;
         case WM_DAYAAH_CAPTURE_ERROR: {
             HRESULT hr = captureError_.load();
+            if (fullscreen_) ToggleFullscreen();
             StopCapture();
             ShowSetup(true);
             std::wstring text = L"La captura se detuvo:\n\n" + HrText(hr) +
-                                L"\n\nMándame DayaahCapture.log si vuelve a pasar.";
+                L"\n\nAbre un Issue en GitHub y adjunta DayaahCapture.log:\n"
+                L"https://github.com/dayitaah/Dayaah-Capture/issues";
             MessageBoxW(window_, text.c_str(), L"Dayaah Capture", MB_ICONERROR);
             return 0;
         }
+        case WM_GETMINMAXINFO: {
+            auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+            limits->ptMinTrackSize.x = capturingUi_ ? 320 : 860;
+            limits->ptMinTrackSize.y = capturingUi_ ? 240 : 630;
+            return 0;
+        }
         case WM_SIZE:
-            if (capturingUi_ && renderer_) {
-                renderer_->Resize(LOWORD(lParam), HIWORD(lParam));
+            if (capturingUi_ && renderer_ && resizeEvent_) {
+                pendingWidth_.store(LOWORD(lParam));
+                pendingHeight_.store(HIWORD(lParam));
+                SetEvent(resizeEvent_);
             }
             return 0;
         case WM_TIMER:
             if (wParam == 1) UpdateFpsTitle();
             else if (wParam == 2) UpdateCursorVisibility();
             return 0;
-        case WM_MOUSEMOVE:
-            if (running_.load()) {
-                lastMouseMove_ = GetTickCount64();
-                if (cursorHidden_) {
-                    cursorHidden_ = false;
-                    SetCursor(LoadCursorW(nullptr, IDC_ARROW));
-                }
-            }
-            return 0;
         case WM_SETCURSOR:
-            if (running_.load() && LOWORD(lParam) == HTCLIENT && cursorHidden_) {
-                SetCursor(nullptr);
+            if (LOWORD(lParam) == HTCLIENT) {
+                const bool hide = running_.load() && cursorHidden_ &&
+                                  GetForegroundWindow() == window_;
+                SetCursor(hide ? hiddenCursor_ : visibleCursor_);
                 return TRUE;
             }
             return DefWindowProcW(window_, message, wParam, lParam);
-        case WM_KEYDOWN:
-            if (wParam == VK_F11) ToggleFullscreen();
-            else if (wParam == VK_ESCAPE) {
-                if (fullscreen_) ToggleFullscreen();
-                else if (running_.load()) {
-                    StopCapture();
-                    ShowSetup(true);
+        case WM_MOUSEMOVE:
+            if (running_.load()) {
+                RecordRealCursorMovement();
+                if (!mouseTracking_) {
+                    TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window_, 0};
+                    mouseTracking_ = TrackMouseEvent(&tracking) == TRUE;
                 }
+            }
+            return 0;
+        case WM_MOUSELEAVE:
+            mouseTracking_ = false;
+            hasLastCursorPosition_ = false;
+            SetCaptureCursorHidden(false);
+            return 0;
+        case WM_NCMOUSEMOVE:
+            SetCaptureCursorHidden(false);
+            return DefWindowProcW(window_, message, wParam, lParam);
+        case WM_ACTIVATEAPP:
+            SetCaptureCursorHidden(false);
+            lastMouseMove_ = GetTickCount64();
+            hasLastCursorPosition_ = false;
+            return 0;
+        case WM_ENTERSIZEMOVE:
+            SetCaptureCursorHidden(false);
+            return 0;
+        case WM_EXITSIZEMOVE:
+            lastMouseMove_ = GetTickCount64();
+            hasLastCursorPosition_ = false;
+            return 0;
+        case WM_KEYDOWN:
+            if (wParam == VK_F11 && !(lParam & (1LL << 30))) ToggleFullscreen();
+            else if (wParam == VK_ESCAPE && !(lParam & (1LL << 30))) {
+                const EscapeWindowAction action = DecideEscapeWindowAction(
+                    running_.load(), fullscreen_, IsZoomed(window_) != FALSE);
+                if (action == EscapeWindowAction::LeaveFullscreen) ToggleFullscreen();
+                else if (action == EscapeWindowAction::RestoreMaximized)
+                    ShowWindow(window_, SW_RESTORE);
             } else if (wParam == 'M' && running_.load()) {
                 audio_.ToggleMute();
                 UpdateFpsTitle();
@@ -991,9 +1030,12 @@ private:
             PaintSetup();
             return 0;
         case WM_CLOSE:
+            SetCaptureCursorHidden(false);
+            StopCapture();
             DestroyWindow(window_);
             return 0;
         case WM_DESTROY:
+            SetCaptureCursorHidden(false);
             StopCapture();
             PostQuitMessage(0);
             return 0;
@@ -1288,7 +1330,8 @@ private:
             HRESULT hr = StartCapture();
             if (FAILED(hr)) {
                 std::wstring text = L"No pude iniciar la captura:\n\n" + HrText(hr) +
-                                    L"\n\nRevisa DayaahCapture.log.";
+                    L"\n\nAbre un Issue en GitHub y adjunta DayaahCapture.log:\n"
+                    L"https://github.com/dayitaah/Dayaah-Capture/issues";
                 MessageBoxW(window_, text.c_str(), L"Dayaah Capture", MB_ICONERROR);
             }
             return 0;
@@ -1352,13 +1395,25 @@ private:
         if (FAILED(hr)) goto failed;
 
         flushEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        frameReadyEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        resizeEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        renderStopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!flushEvent_ || !frameReadyEvent_ || !resizeEvent_ || !renderStopEvent_) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto failed;
+        }
         running_.store(true);
+        renderThread_ = CreateThread(nullptr, 0, RenderThreadEntry, this, 0, nullptr);
+        if (!renderThread_) {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            goto failed;
+        }
         lastMouseMove_ = GetTickCount64();
-        cursorHidden_ = false;
+        hasLastCursorPosition_ = false;
+        SetCaptureCursorHidden(false);
         receivedFrames_ = 0;
         renderedFrames_ = 0;
         lastFpsFrames_ = 0;
-        frameMessagePending_ = 0;
 
         {
             int audioIndex = ComboBox_GetCurSel(audioCombo_);
@@ -1383,7 +1438,7 @@ private:
     }
 
     void StopCapture() {
-        if (!running_.exchange(false) && !reader_ && !renderer_) return;
+        if (!running_.exchange(false) && !reader_ && !renderer_ && !renderThread_) return;
         audio_.Stop();
         if (reader_) {
             if (flushEvent_) ResetEvent(flushEvent_);
@@ -1391,6 +1446,24 @@ private:
             if (flushEvent_) WaitForSingleObject(flushEvent_, 500);
         }
         SafeRelease(reader_);
+        if (renderStopEvent_) SetEvent(renderStopEvent_);
+        if (renderThread_) {
+            WaitForSingleObject(renderThread_, INFINITE);
+            CloseHandle(renderThread_);
+            renderThread_ = nullptr;
+        }
+        if (frameReadyEvent_) {
+            CloseHandle(frameReadyEvent_);
+            frameReadyEvent_ = nullptr;
+        }
+        if (resizeEvent_) {
+            CloseHandle(resizeEvent_);
+            resizeEvent_ = nullptr;
+        }
+        if (renderStopEvent_) {
+            CloseHandle(renderStopEvent_);
+            renderStopEvent_ = nullptr;
+        }
         if (activeDeviceIndex_ >= 0 && activeDeviceIndex_ < static_cast<int>(videoDevices_.size())) {
             videoDevices_[activeDeviceIndex_].activate->ShutdownObject();
         } else if (mediaSource_) {
@@ -1408,8 +1481,7 @@ private:
         }
         delete renderer_;
         renderer_ = nullptr;
-        cursorHidden_ = false;
-        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        SetCaptureCursorHidden(false);
         EnterCriticalSection(&frameLock_);
         latestFrame_.clear();
         renderFrame_.clear();
@@ -1418,26 +1490,42 @@ private:
         LogLine(L"Captura detenida");
     }
 
-    void RenderLatestFrame() {
-        ULONGLONG serial = 0;
-        EnterCriticalSection(&frameLock_);
-        latestFrame_.swap(renderFrame_);
-        serial = latestSerial_;
-        LeaveCriticalSection(&frameLock_);
-        if (renderer_ && !renderFrame_.empty()) {
-            HRESULT hr = renderer_->Render(renderFrame_.data(), renderFrame_.size(), sourceStride_);
-            if (SUCCEEDED(hr)) renderedFrames_++;
-            else if (hr != DXGI_STATUS_OCCLUDED) LogLine(L"Present fallo: %s", HrText(hr).c_str());
-        }
-        renderedSerial_ = serial;
-        InterlockedExchange(&frameMessagePending_, 0);
+    static DWORD WINAPI RenderThreadEntry(LPVOID context) {
+        return static_cast<DayaahApp*>(context)->RenderLoop();
+    }
 
-        EnterCriticalSection(&frameLock_);
-        bool newer = latestSerial_ != renderedSerial_;
-        LeaveCriticalSection(&frameLock_);
-        if (newer && InterlockedCompareExchange(&frameMessagePending_, 1, 0) == 0) {
-            PostMessageW(window_, WM_DAYAAH_FRAME, 0, 0);
+    DWORD RenderLoop() {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        HANDLE events[] = {renderStopEvent_, resizeEvent_, frameReadyEvent_};
+        for (;;) {
+            const DWORD wait = WaitForMultipleObjects(_countof(events), events, FALSE, INFINITE);
+            if (wait == WAIT_OBJECT_0) break;
+            if (wait == WAIT_OBJECT_0 + 1) {
+                const UINT width = pendingWidth_.load();
+                const UINT height = pendingHeight_.load();
+                if (renderer_ && width >= 16 && height >= 16) {
+                    const HRESULT hr = renderer_->Resize(width, height);
+                    if (FAILED(hr)) LogLine(L"Resize D3D11 fallo: %s", HrText(hr).c_str());
+                }
+                continue;
+            }
+            if (wait != WAIT_OBJECT_0 + 2) {
+                LogLine(L"Hilo de render detenido por WaitForMultipleObjects: %lu", wait);
+                break;
+            }
+
+            EnterCriticalSection(&frameLock_);
+            latestFrame_.swap(renderFrame_);
+            LeaveCriticalSection(&frameLock_);
+            if (!renderer_ || renderFrame_.empty() || IsIconic(window_)) continue;
+
+            const HRESULT hr = renderer_->Render(renderFrame_.data(), renderFrame_.size(), sourceStride_);
+            if (SUCCEEDED(hr)) renderedFrames_++;
+            else if (hr != DXGI_STATUS_OCCLUDED) {
+                LogLine(L"Present fallo: %s", HrText(hr).c_str());
+            }
         }
+        return 0;
     }
 
     void ShowSetup(bool show) {
@@ -1446,10 +1534,10 @@ private:
                            startButton_, statusText_};
         for (HWND control : controls) ShowWindow(control, show ? SW_SHOW : SW_HIDE);
         if (show) {
-            SetWindowTextW(window_, L"Dayaah Capture");
+            SetWindowTextW(window_, L"Dayaah Capture 1.1.3");
             InvalidateRect(window_, nullptr, TRUE);
         } else {
-            SetWindowTextW(window_, L"Dayaah Capture - iniciando...");
+            SetWindowTextW(window_, L"Dayaah Capture 1.1.3 - iniciando...");
         }
     }
 
@@ -1460,7 +1548,7 @@ private:
         lastFpsFrames_ = now;
         wchar_t title[240]{};
         _snwprintf_s(title, _countof(title), _TRUNCATE,
-                     L"Dayaah Capture  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s",
+                     L"Dayaah Capture 1.1.3  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s",
                      fps, activeMode_.width, activeMode_.height, activeMode_.Fps(),
                      GuidFormatName(activeMode_.subtype).c_str(),
                      audio_.IsMuted() ? L"MUTE" : L"ON");
@@ -1468,45 +1556,80 @@ private:
     }
 
     void UpdateCursorVisibility() {
-        if (!running_.load()) {
-            cursorHidden_ = false;
+        RecordRealCursorMovement();
+
+        POINT cursor{};
+        RECT client{};
+        bool pointerInside = false;
+        if (GetCursorPos(&cursor)) {
+            ScreenToClient(window_, &cursor);
+            GetClientRect(window_, &client);
+            pointerInside = PtInRect(&client, cursor) == TRUE;
+        }
+        const bool shouldHide = ShouldHideCaptureCursor(
+            running_.load(), GetForegroundWindow() == window_, IsIconic(window_) != FALSE,
+            pointerInside, GetTickCount64() - lastMouseMove_);
+        SetCaptureCursorHidden(shouldHide);
+    }
+
+    void RecordRealCursorMovement() {
+        POINT cursor{};
+        if (!GetCursorPos(&cursor)) return;
+        if (!PointerPositionChanged(hasLastCursorPosition_,
+                                    lastCursorPosition_.x, lastCursorPosition_.y,
+                                    cursor.x, cursor.y)) {
             return;
         }
-        if (!cursorHidden_ && GetTickCount64() - lastMouseMove_ >= 1000) {
-            POINT cursor{};
-            RECT client{};
-            if (GetCursorPos(&cursor)) {
-                ScreenToClient(window_, &cursor);
-                GetClientRect(window_, &client);
-                if (PtInRect(&client, cursor)) {
-                    cursorHidden_ = true;
-                    SetCursor(nullptr);
-                }
-            }
+        lastCursorPosition_ = cursor;
+        hasLastCursorPosition_ = true;
+        lastMouseMove_ = GetTickCount64();
+        SetCaptureCursorHidden(false);
+    }
+
+    void SetCaptureCursorHidden(bool hidden) {
+        cursorHidden_ = hidden;
+
+        // Apply a real transparent cursor only while the pointer is over the
+        // client area. WM_SETCURSOR reapplies the same state whenever Windows
+        // tries to restore the class cursor, without touching global counters.
+        // The timer intentionally reapplies it too, even when the state did
+        // not change, because some overlays can replace the active cursor.
+        if (!window_) return;
+        POINT cursor{};
+        RECT client{};
+        if (!GetCursorPos(&cursor) || !ScreenToClient(window_, &cursor) ||
+            !GetClientRect(window_, &client) || !PtInRect(&client, cursor)) {
+            return;
         }
+        const bool hideNow = hidden && running_.load() &&
+                             GetForegroundWindow() == window_;
+        SetCursor(hideNow ? hiddenCursor_ : visibleCursor_);
     }
 
     void ToggleFullscreen() {
         if (!running_.load()) return;
         if (!fullscreen_) {
-            windowStyle_ = GetWindowLongW(window_, GWL_STYLE);
-            GetWindowRect(window_, &windowRect_);
+            SetCaptureCursorHidden(false);
+            windowStyle_ = GetWindowLongPtrW(window_, GWL_STYLE);
+            windowPlacement_.length = sizeof(windowPlacement_);
+            GetWindowPlacement(window_, &windowPlacement_);
             MONITORINFO monitor{};
             monitor.cbSize = sizeof(monitor);
             GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
-            SetWindowLongW(window_, GWL_STYLE, windowStyle_ & ~WS_OVERLAPPEDWINDOW);
+            SetWindowLongPtrW(window_, GWL_STYLE, windowStyle_ & ~WS_OVERLAPPEDWINDOW);
             SetWindowPos(window_, HWND_TOP, monitor.rcMonitor.left, monitor.rcMonitor.top,
                          monitor.rcMonitor.right - monitor.rcMonitor.left,
                          monitor.rcMonitor.bottom - monitor.rcMonitor.top,
                          SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
             fullscreen_ = true;
         } else {
-            SetWindowLongW(window_, GWL_STYLE, windowStyle_);
-            SetWindowPos(window_, nullptr, windowRect_.left, windowRect_.top,
-                         windowRect_.right - windowRect_.left,
-                         windowRect_.bottom - windowRect_.top,
-                         SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
+            SetWindowLongPtrW(window_, GWL_STYLE, windowStyle_);
+            SetWindowPlacement(window_, &windowPlacement_);
+            SetWindowPos(window_, nullptr, 0, 0, 0, 0,
+                         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                         SWP_NOZORDER | SWP_NOOWNERZORDER);
             fullscreen_ = false;
+            lastMouseMove_ = GetTickCount64();
         }
     }
 
@@ -1559,6 +1682,8 @@ private:
     HFONT font_ = nullptr;
     HBRUSH darkBrush_ = nullptr;
     HBRUSH controlBrush_ = nullptr;
+    HCURSOR visibleCursor_ = nullptr;
+    HCURSOR hiddenCursor_ = nullptr;
     IMMDeviceEnumerator* audioEnumerator_ = nullptr;
     std::vector<VideoDeviceInfo> videoDevices_;
     std::vector<AudioDeviceInfo> audioDevices_;
@@ -1575,19 +1700,25 @@ private:
     CRITICAL_SECTION frameLock_{};
     std::vector<BYTE> latestFrame_;
     std::vector<BYTE> renderFrame_;
-    ULONGLONG latestSerial_ = 0;
-    ULONGLONG renderedSerial_ = 0;
     LONG sourceStride_ = 0;
-    LONG frameMessagePending_ = 0;
+    HANDLE frameReadyEvent_ = nullptr;
+    HANDLE resizeEvent_ = nullptr;
+    HANDLE renderStopEvent_ = nullptr;
+    HANDLE renderThread_ = nullptr;
+    std::atomic<UINT> pendingWidth_{0};
+    std::atomic<UINT> pendingHeight_{0};
     std::atomic<ULONGLONG> receivedFrames_{0};
     std::atomic<ULONGLONG> renderedFrames_{0};
     ULONGLONG lastFpsFrames_ = 0;
     ULONGLONG lastMouseMove_ = 0;
+    POINT lastCursorPosition_{};
+    bool hasLastCursorPosition_ = false;
     bool cursorHidden_ = false;
+    bool mouseTracking_ = false;
     bool capturingUi_ = false;
     bool fullscreen_ = false;
-    DWORD windowStyle_ = 0;
-    RECT windowRect_{};
+    LONG_PTR windowStyle_ = 0;
+    WINDOWPLACEMENT windowPlacement_{};
 };
 
 STDMETHODIMP SourceReaderCallback::QueryInterface(REFIID iid, void** object) {
@@ -1624,12 +1755,14 @@ STDMETHODIMP SourceReaderCallback::OnFlush(DWORD) {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     std::wstring logPath = JoinPath(ModuleDirectory(), L"DayaahCapture.log");
     DeleteFileW(logPath.c_str());
-    LogLine(L"Dayaah Capture 1.0 iniciando");
+    LogLine(L"Dayaah Capture 1.1.3 cursor hotfix iniciando");
 
     DayaahApp app;
     HRESULT hr = app.Initialize(instance);
     if (FAILED(hr)) {
-        std::wstring text = L"Dayaah Capture no pudo iniciar:\n\n" + HrText(hr);
+        std::wstring text = L"Dayaah Capture no pudo iniciar:\n\n" + HrText(hr) +
+            L"\n\nAbre un Issue en GitHub y adjunta DayaahCapture.log:\n"
+            L"https://github.com/dayitaah/Dayaah-Capture/issues";
         LogLine(L"Inicializacion fallida: %s", HrText(hr).c_str());
         MessageBoxW(nullptr, text.c_str(), L"Dayaah Capture", MB_ICONERROR);
         return 1;

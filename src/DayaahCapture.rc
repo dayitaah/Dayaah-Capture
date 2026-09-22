@@ -7,8 +7,8 @@ IDI_DAYAAH ICON "DayaahCapture.ico"
 IDI_DAYAAH_HEADER ICON "DayaahCapture-header.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION 1,1,3,0
+ PRODUCTVERSION 1,1,3,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -20,13 +20,13 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName", "Dayaah"
-            VALUE "FileDescription", "Dayaah Capture"
-            VALUE "FileVersion", "1.0"
+            VALUE "FileDescription", "Dayaah Capture Cursor Hotfix"
+            VALUE "FileVersion", "1.1.3"
             VALUE "InternalName", "DayaahCapture"
             VALUE "LegalCopyright", "Copyright (c) 2026 Dayaah"
             VALUE "OriginalFilename", "DayaahCapture.exe"
             VALUE "ProductName", "Dayaah Capture"
-            VALUE "ProductVersion", "1.0"
+            VALUE "ProductVersion", "1.1.3"
         END
     END
     BLOCK "VarFileInfo"
