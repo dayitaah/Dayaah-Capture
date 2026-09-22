@@ -175,7 +175,11 @@ Bug reports and improvements are welcome in English or Spanish. Read
 ## Support Dayaah Capture
 
 If Dayaah Capture saved you from capture-latency hell, you can support its
-development on [Ko-fi](https://ko-fi.com/dayaah).
+development on Ko-fi:
+
+<p>
+  <a href="https://ko-fi.com/dayaah"><img alt="Support Dayaah on Ko-fi" src="https://img.shields.io/badge/Support%20Dayaah-Ko--fi-FF5E5B?logo=kofi&logoColor=white"></a>
+</p>
 
 ## License
 
