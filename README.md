@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 1.1.3" src="https://img.shields.io/badge/version-1.0-53D7B2">
+  <img alt="Version 1.1.3" src="https://img.shields.io/badge/version-1.1.3-53D7B2">
   <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
   <img alt="Licencia MIT" src="https://img.shields.io/badge/license-MIT-53D7B2">
