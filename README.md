@@ -1,136 +1,63 @@
-<p align="right"><strong>English</strong> · <a href="README.es.md">Español</a></p>
+# Dayaah Capture 1.1.3
 
-<p align="center">
-  <img src="assets/dayaah-capture-icon.png" width="180" alt="Dayaah Capture">
-</p>
+Native, ultra-low-latency HDMI capture-card preview for Windows 10/11 x64.
+No MPV, FFmpeg or installation required.
 
-<h1 align="center">Dayaah Capture -- Ultra-Low-Latency Capture Preview for Windows</h1>
+## What changed in 1.1.3
 
-<p align="center">
-  Native ultra-low-latency HDMI capture preview for Windows.
-</p>
+- Repeated synthetic `WM_MOUSEMOVE` messages no longer reset the cursor idle
+  timer unless the physical screen coordinates actually changed.
 
-<p align="center">
-  <img alt="Version 1.0" src="https://img.shields.io/badge/version-1.0-53D7B2">
-  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
-  <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
-  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-53D7B2">
-</p>
-
-Dayaah Capture displays raw video directly from a compatible capture card, keeps only the newest frame, and presents it through D3D11. It does not require MPV, FFmpeg, an installer, or background services.
+- Replaced the unreliable global `ShowCursor` counter with a private transparent
+  cursor owned by Dayaah Capture.
+- Windows can no longer restore the arrow over the video while the cursor is
+  supposed to be hidden.
+- The cursor is restored when moving it, leaving the video, switching apps,
+  resizing, or closing Dayaah Capture.
+- Fullscreen now restores the previous maximized or normal window placement.
+- `Esc` is non-destructive: it only leaves fullscreen or restores a maximized
+  window. It never stops video or audio.
+- Added vertical room to the initial setup window.
 
 ## Features
 
-- Native capture through Windows Media Foundation.
-- Raw NV12 and YUY2 modes with no recompression.
-- D3D11 Video Processor color conversion and scaling.
-- Single-frame, *latest frame wins* video queue.
-- Minimum-latency mode with tearing allowed.
-- Optional VSync with a maximum one-frame queue.
+- Media Foundation raw NV12/YUY2 capture.
+- D3D11 video conversion, scaling, and presentation.
+- Dedicated render thread and latest-frame-only queue.
+- Optional one-frame VSync or minimum-latency tearing mode.
 - WASAPI audio in the same process.
-- Selectable amplification: 0, +6, +12, +15, or +18 dB.
-- Automatic device, resolution, frame-rate, and format enumeration.
-- Fullscreen mode, quick mute, and automatic cursor hiding.
-- Persistent local INI configuration.
-
-## Download and use
-
-1. Open **Releases** on the repository page.
-2. Download `Dayaah-Capture-1.0-Windows-x64.zip`.
-3. Extract the complete folder.
-4. Run `DayaahCapture.exe`.
-5. Select your capture card, video mode, and audio input.
-
-Recommended starting point for the UGREEN 25173:
-
-```text
-1920 x 1080 - 60 fps - NV12
-HDMI (UGREEN 25173)
-+15 dB
-Minimum latency (tearing may occur)
-```
-
-## Compatibility
-
-Dayaah Capture is not locked to a particular brand. It enumerates capture devices exposed by Windows through Media Foundation when they provide raw `NV12` or `YUY2` video.
-
-Devices that expose only MJPEG, H.264, or another compressed format will not appear. This is intentional: it avoids hidden conversion stages and keeps latency predictable.
-
-The capture card's audio must appear as a separate recording device in Windows. Audio is sent to the default playback device.
+- 0, +6, +12, +15, or +18 dB audio gain.
 
 ## Controls
 
 | Control | Action |
 | --- | --- |
-| `F11` or double-click | Enter or leave fullscreen |
-| `Esc` | Leave fullscreen or return to setup |
-| `M` | Mute or restore audio |
-| Move the mouse | Show the cursor; it hides after one second |
+| `F11` or double-click | Toggle fullscreen |
+| `Esc` | Leave fullscreen / restore maximized window |
+| `M` | Toggle mute |
 
-## Presentation modes
+The cursor hides after one second without movement over the video and returns
+immediately when moved.
 
-| Mode | Behavior |
-| --- | --- |
-| Minimum latency | Presents immediately; a tearing line may appear |
-| VSync | Removes tearing; may add up to one refresh interval |
+## Download and usage
 
-## Build on Windows
+Download the latest ZIP from [Releases](https://github.com/dayitaah/Dayaah-Capture/releases/latest),
+extract it into its own folder, and run `DayaahCapture.exe`.
 
-You need Windows 10/11 and **Visual Studio 2022 Build Tools** with Desktop development with C++ and a Windows SDK.
+For a UGREEN 25173, a good starting point is `1920x1080 60 fps NV12`, its HDMI
+audio input, and minimum-latency synchronization.
 
-1. Open `x64 Native Tools Command Prompt for VS 2022`.
-2. Enter the project directory.
-3. Run:
+## Reporting bugs
 
-```bat
-build.bat
-```
+Open a [GitHub Issue](https://github.com/dayitaah/Dayaah-Capture/issues) and
+attach `DayaahCapture.log`. Include your capture-card model, selected video
+mode, Windows version, and exact reproduction steps. Copy the log before
+launching Dayaah Capture again because a new log is created on every run.
 
-The executable will be written to `build\DayaahCapture.exe`.
+## Building
 
-Every push and pull request also starts a clean GitHub Actions build. The resulting executable can be downloaded from the **Windows build** workflow run.
+On Windows, run `src/build-msvc.bat` from an x64 Native Tools Command Prompt for
+Visual Studio 2022. A MinGW cross-build helper is also included for maintainers.
 
-## Technical design
-
-```text
-UVC capture card
-  → Media Foundation Source Reader (asynchronous, low latency)
-  → newest-frame buffer
-  → NV12/YUY2 texture
-  → D3D11 Video Processor
-  → flip-discard swap chain
-
-Capture-card audio
-  → WASAPI capture
-  → digital gain
-  → WASAPI render
-```
-
-## Known limitations
-
-- Windows x64 only.
-- Raw NV12/YUY2 video only; no MJPEG or H.264.
-- HDR is not implemented yet.
-- Current conversion assumes limited-range BT.709 to full-range RGB.
-- +15 and +18 dB may clip an already loud input signal.
-- No recording, shaders, overlays, or frame generation.
-
-## Privacy
-
-Dayaah Capture works locally. It contains no telemetry, advertising, accounts, analytics, or network connections.
-
-## Contributing
-
-Bug reports and improvements are welcome in English or Spanish. Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
-
-## Support Dayaah Capture
-
-If the app saved you from capture latency hell, you can support its development on Ko-fi:
-
-<p>
-  <a href="https://ko-fi.com/dayaah"><img alt="Support Dayaah on Ko-fi" src="https://img.shields.io/badge/Support%20Dayaah-Ko--fi-FF5E5B?logo=kofi&logoColor=white"></a>
-</p>
-
-## License
-
-Released under the [MIT License](LICENSE). Copyright © 2026 Dayaah.
+Licensed under the MIT License. If Dayaah Capture helps you, you can support the
+project on [Ko-fi](https://ko-fi.com/dayaah).

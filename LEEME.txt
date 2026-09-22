@@ -1,0 +1,76 @@
+DAYAAH CAPTURE 1.1.3 — CURSOR HOTFIX
+================================================
+
+Vista previa nativa de capturadoras HDMI para Windows 10/11 x64.
+No requiere MPV, FFmpeg ni instalación.
+
+NOVEDADES DE LA 1.1.3
+---------------------
+- Ventana inicial con espacio vertical suficiente para mostrar todo el estado.
+- Restauración correcta del estado previo al salir de pantalla completa.
+- Esc ya no detiene la captura: sale de pantalla completa o restaura una
+  ventana maximizada; en una ventana normal no hace nada.
+- Nuevo cursor transparente privado: ya no depende del contador global
+  ShowCursor de Windows.
+- Windows ya no puede reponer la flecha encima del video mientras debe estar
+  oculta.
+- Los mensajes de movimiento repetidos de Windows u overlays ya no reinician
+  el temporizador si las coordenadas reales del cursor no cambiaron.
+- El cursor reaparece obligatoriamente al moverlo, salir del video, hacer
+  Alt+Tab, redimensionar o cerrar el programa.
+
+PRIMERA PRUEBA
+--------------
+1. Extrae toda la carpeta en un lugar normal, por ejemplo Documentos.
+2. Ejecuta DayaahCapture.exe.
+3. Selecciona la capturadora, un modo NV12 o YUY2 y la entrada de audio.
+4. Para la UGREEN 25173 se recomienda comenzar con:
+      1920 x 1080 - 60 fps - NV12
+      HDMI (UGREEN 25173)
+      +15 dB
+      Latencia mínima (puede haber tearing)
+5. Pulsa INICIAR CAPTURA.
+
+CONTROLES
+---------
+F11 o doble clic  Pantalla completa
+Esc               Salir de pantalla completa / restaurar maximizada
+M                 Silenciar / activar audio
+
+El cursor se oculta tras un segundo sin movimiento dentro del video. Muévelo
+para recuperarlo inmediatamente. Fuera del video siempre debe permanecer visible.
+
+DISEÑO DE BAJA LATENCIA
+-----------------------
+- Media Foundation con MF_LOW_LATENCY.
+- Video crudo NV12/YUY2; no usa MJPEG.
+- Conserva únicamente el cuadro más reciente.
+- D3D11 Video Processor para conversión y escalado.
+- Hilo de render separado de la interfaz.
+- Profundidad de presentación mínima y tearing opcional.
+- Audio WASAPI en el mismo proceso, con ganancia 0/+6/+12/+15/+18 dB.
+- Si el audio acumula cola, descarta lo antiguo para volver al directo.
+
+ARCHIVOS QUE CREA
+-----------------
+DayaahCapture.ini  Recuerda la última configuración.
+DayaahCapture.log  Diagnóstico para reportar fallos.
+
+REPORTAR UN ERROR
+-----------------
+Abre un Issue en:
+https://github.com/dayitaah/Dayaah-Capture/issues
+
+Adjunta DayaahCapture.log e indica capturadora, modo de video, Windows y los
+pasos exactos para reproducirlo. Haz una copia del log antes de volver a abrir
+el programa, porque se crea uno nuevo en cada ejecución.
+
+NOTAS
+-----
+- La conversión es SDR BT.709 de rango limitado a RGB completo.
+- La salida de audio usa el dispositivo predeterminado de Windows.
+- +15/+18 dB pueden saturar si la entrada ya viene fuerte.
+- Si aparece tearing, elige "VSync (cola máxima: 1 cuadro)" antes de iniciar.
+- Puedes conservar tu DayaahCapture.ini anterior.
+
+Licencia MIT. Proyecto: https://github.com/dayitaah/Dayaah-Capture
