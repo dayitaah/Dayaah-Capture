@@ -5,7 +5,7 @@
 <h1 align="center">Dayaah Capture</h1>
 
 <p align="center">
-  Native ultra-low-latency HDMI capture viewer for Windows 10/11 x64.
+  Native ultra-low-latency HDMI capture card viewer for Windows 10/11 x64.
 </p>
 
 <p align="center">
