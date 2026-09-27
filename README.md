@@ -5,7 +5,7 @@
 <h1 align="center">Dayaah Capture</h1>
 
 <p align="center">
-  Vista previa nativa y de latencia ultrabaja para capturadoras HDMI en Windows.
+  Native ultra-low-latency HDMI capture viewer for Windows 10/11 x64.
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 
 **English** · [Español](README.es.md)
 
-Native ultra-low-latency HDMI capture preview for Windows 10/11 x64.
+Native ultra-low-latency HDMI capture viewer for Windows 10/11 x64.
 
 Dayaah Capture reads raw video directly from a compatible capture card, keeps
 only the newest frame, and presents it through D3D11. Capture-card audio is
