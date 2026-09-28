@@ -1589,11 +1589,6 @@ private:
     void SetCaptureCursorHidden(bool hidden) {
         cursorHidden_ = hidden;
 
-        // Apply a real transparent cursor only while the pointer is over the
-        // client area. WM_SETCURSOR reapplies the same state whenever Windows
-        // tries to restore the class cursor, without touching global counters.
-        // The timer intentionally reapplies it too, even when the state did
-        // not change, because some overlays can replace the active cursor.
         if (!window_) return;
         POINT cursor{};
         RECT client{};
