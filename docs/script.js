@@ -25,7 +25,7 @@ async function updateLatestRelease() {
 const i18n = {
   en: {
     nav_features:'Features', nav_how:'How it works', nav_requirements:'Requirements', download:'Download',
-    eyebrow:'Native Windows capture preview', hero_a:'Your capture card.', hero_b:'Without the latency hell.',
+    eyebrow:'Native Windows capture viewer', hero_a:'Your capture card.', hero_b:'Without the latency hell.',
     hero_lead:'Dayaah Capture keeps only the newest frame and presents it through D3D11, built for people who want to actually play through a capture card.',
     download_latest:'Download latest', view_github:'View on GitHub', portable:'Portable', no_telemetry:'No telemetry', device:'VIDEO DEVICE', mode:'MODE', audio:'AUDIO', minimum_latency:'Minimum latency', frame_queue:'newest-frame queue', background_services:'background services',
     built_for_speed:'BUILT FOR SPEED', features_title:'Less pipeline. Less waiting.', features_lead:'Dayaah Capture skips the stuff you do not need when the goal is simple: get HDMI video onto your screen as quickly as possible.',
@@ -40,11 +40,11 @@ const i18n = {
     req1:'Native desktop application.', req2:'Your capture card must expose one of these modes through Media Foundation.', audio_input:'Windows audio input', req3:'Required only if you want audio monitoring.',
     quick_start:'QUICK START', step1:'Download and extract the ZIP.', step2:'Run DayaahCapture.exe.', step3:'Choose your video device, mode and audio input.', step4:'Hit Start and play.', controls_link:'See keyboard controls',
     support_title:'Useful? Buy Dayaah a coffee ☕', support_text:'Dayaah Capture is free and open source. If it saved you from capture latency hell, you can support development on Ko-fi.', report_bug:'Report a bug',
-    final_title:'Less latency. More game.', final_text:'Portable. Open source. Built for Windows.', download_dayaah:'Download Dayaah Capture', footer_tagline:'Native ultra-low-latency HDMI capture preview for Windows.'
+    final_title:'Less latency. More game.', final_text:'Portable. Open source. Built for Windows.', download_dayaah:'Download Dayaah Capture', footer_tagline:'Native ultra-low-latency HDMI capture viewer for Windows.'
   },
   es: {
     nav_features:'Funciones', nav_how:'Cómo funciona', nav_requirements:'Requisitos', download:'Descargar',
-    eyebrow:'Vista previa nativa para Windows', hero_a:'Tu capturadora.', hero_b:'Sin el infierno de latencia.',
+    eyebrow:'Visor nativo para Windows', hero_a:'Tu capturadora.', hero_b:'Sin el infierno de latencia.',
     hero_lead:'Dayaah Capture conserva únicamente el cuadro más reciente y lo presenta mediante D3D11, pensado para quienes quieren jugar de verdad a través de una capturadora.',
     download_latest:'Descargar última versión', view_github:'Ver en GitHub', portable:'Portable', no_telemetry:'Sin telemetría', device:'DISPOSITIVO DE VIDEO', mode:'MODO', audio:'AUDIO', minimum_latency:'Latencia mínima', frame_queue:'cuadro más reciente', background_services:'servicios en segundo plano',
     built_for_speed:'HECHO PARA LA VELOCIDAD', features_title:'Menos recorrido. Menos espera.', features_lead:'Dayaah Capture se salta lo que no necesitas cuando el objetivo es simple: llevar el HDMI a tu pantalla lo más rápido posible.',
@@ -59,7 +59,7 @@ const i18n = {
     req1:'Aplicación nativa de escritorio.', req2:'Tu capturadora debe exponer uno de estos modos mediante Media Foundation.', audio_input:'Entrada de audio de Windows', req3:'Solo es necesaria si quieres monitorear el audio.',
     quick_start:'INICIO RÁPIDO', step1:'Descarga y extrae el ZIP.', step2:'Ejecuta DayaahCapture.exe.', step3:'Elige el dispositivo de video, modo y entrada de audio.', step4:'Pulsa Start y a jugar.', controls_link:'Ver controles de teclado',
     support_title:'¿Te sirvió? Invítale un café a Dayaah ☕', support_text:'Dayaah Capture es gratuito y de código abierto. Si te salvó del infierno de latencia de las capturadoras, puedes apoyar el desarrollo en Ko-fi.', report_bug:'Reportar un bug',
-    final_title:'Menos latencia. Más juego.', final_text:'Portable. Código abierto. Hecho para Windows.', download_dayaah:'Descargar Dayaah Capture', footer_tagline:'Vista previa HDMI nativa de latencia ultrabaja para Windows.'
+    final_title:'Menos latencia. Más juego.', final_text:'Portable. Código abierto. Hecho para Windows.', download_dayaah:'Descargar Dayaah Capture', footer_tagline:'Visor HDMI nativo de latencia ultrabaja para Windows.'
   }
 };
 
