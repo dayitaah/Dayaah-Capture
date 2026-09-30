@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 1.1.3" src="https://img.shields.io/badge/version-1.1.3-53D7B2">
+  <img alt="Version 1.3.0" src="https://img.shields.io/badge/version-1.3.0-53D7B2">
   <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
   <img alt="Licencia MIT" src="https://img.shields.io/badge/license-MIT-53D7B2">
@@ -27,7 +27,7 @@ only the newest frame, and presents it through D3D11. Capture-card audio is
 played through WASAPI in the same process. No MPV, FFmpeg, installer, account,
 or background service is required.
 
-The current stable release is **v1.1.3**.
+The current stable release is **v1.3.0**.
 
 ## Features
 
@@ -84,10 +84,27 @@ open the card.
 
 | Control | Action |
 | --- | --- |
+| Right-click | Open the context menu |
 | `F11` or double-click | Enter or leave fullscreen |
 | `Esc` | Leave fullscreen or restore a maximized window |
 | `M` | Mute or restore audio |
+| `F10` | Show or hide all overlays |
 | Move the mouse | Show the cursor; it hides after one second of real inactivity |
+
+
+The hidden RGB effect displays its active state in the window title and reports
+when the GPU cannot support the required hue filter.
+Type DISCO to activate it while the viewer is running
+
+Open the editor from the context menu. Its canvas is a viewer for arranging
+layers. Internal statistics cover received and presented FPS, discarded frames,
+resolution/format, sync mode, and last-frame age.
+
+The layout automatically saves to `DayaahCapture.overlays.json` next to the EXE
+and reloads at startup. Keep that file when updating and retain PNGs at their
+original paths. Opacity and size update while typing; closing the editor returns
+focus to capture without changing its window state.
+
 
 ## Presentation modes
 
@@ -96,13 +113,17 @@ open the card.
 | Minimum latency | Presents immediately; a tearing line may appear |
 | VSync | Removes tearing; may add up to one display refresh interval |
 
-## What's new in v1.1.3
+## What is included in 1.3.0
 
-- Duplicate or synthetic mouse-move messages no longer prevent the cursor from
-  hiding.
-- Fullscreen reliably restores the previous normal or maximized window state.
-- `Esc` no longer stops video or audio after repeated presses.
-- The initial window has enough vertical space for the complete status line.
+- Right-click context menu while capture is running.
+- Live gain, mute, and VSync controls.
+- Live limited (16-235) or full (0-255) input-range selection.
+- Hidden THPS4-inspired RGB disco easter egg during capture.
+- Separate overlay editor with text, 12/24-hour clock, transparent PNGs,
+  internal statistics, drag/resize, styling, anchors, and JSON profiles.
+- Resolution, FPS, or raw-format switching with a controlled capture restart
+  and automatic rollback when the device rejects the requested mode.
+
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release notes.
 
@@ -157,8 +178,6 @@ on every run.
 
 - Windows x64 only.
 - Raw NV12/YUY2 input only.
-- The current SDR conversion uses limited-range BT.709 input and full-range RGB
-  output.
 - Audio uses the Windows default playback device.
 - +15 and +18 dB may clip an already loud input signal.
 

@@ -1,23 +1,20 @@
-DAYAAH CAPTURE 1.1.3 — CURSOR HOTFIX
+DAYAAH CAPTURE 1.3.0 — VISOR DE CAPTURADORAS HDMI
 ================================================
 
-Vista previa nativa de capturadoras HDMI para Windows 10/11 x64.
+Visor nativo de capturadoras HDMI para Windows 10/11 x64.
 No requiere MPV, FFmpeg ni instalación.
 
-NOVEDADES DE LA 1.1.3
----------------------
-- Ventana inicial con espacio vertical suficiente para mostrar todo el estado.
-- Restauración correcta del estado previo al salir de pantalla completa.
-- Esc ya no detiene la captura: sale de pantalla completa o restaura una
-  ventana maximizada; en una ventana normal no hace nada.
-- Nuevo cursor transparente privado: ya no depende del contador global
-  ShowCursor de Windows.
-- Windows ya no puede reponer la flecha encima del video mientras debe estar
-  oculta.
-- Los mensajes de movimiento repetidos de Windows u overlays ya no reinician
-  el temporizador si las coordenadas reales del cursor no cambiaron.
-- El cursor reaparece obligatoriamente al moverlo, salir del video, hacer
-  Alt+Tab, redimensionar o cerrar el programa.
+NOVEDADES DE LA VERSIÓN 1.3.0
+----------------------
+- Clic derecho durante la captura para abrir el menú contextual.
+- Ganancia, silencio y VSync ajustables en vivo.
+- Rango de entrada limitado (16-235) o completo (0-255) ajustable en vivo.
+- Easter egg RGB inspirado en el modo disco de THPS4, activable durante la captura.
+- Editor separado de overlays: texto, reloj 12/24 h, PNG transparente y
+  estadísticas internas. Permite arrastrar, redimensionar, elegir fuente,
+  color, opacidad, alineación y anclaje, y guardar/cargar perfiles JSON.
+- Cambio de resolución, FPS o formato crudo con reinicio controlado y
+  restauración automática si la capturadora rechaza el nuevo modo.
 
 PRIMERA PRUEBA
 --------------
@@ -33,12 +30,22 @@ PRIMERA PRUEBA
 
 CONTROLES
 ---------
+Clic derecho      Menú contextual
 F11 o doble clic  Pantalla completa
 Esc               Salir de pantalla completa / restaurar maximizada
 M                 Silenciar / activar audio
+F10               Mostrar / ocultar overlays
 
+El modo disco RGB es un easter egg con el teclado durante la captura. Cuando está
+activo aparece en el título; si la GPU no admite el filtro de tono, se avisa.
+Activable escribiendo DISCO durante la captura
 El cursor se oculta tras un segundo sin movimiento dentro del video. Muévelo
 para recuperarlo inmediatamente. Fuera del video siempre debe permanecer visible.
+
+Los overlays se guardan automáticamente y se restauran al abrir la aplicación.
+La opacidad y el tamaño se aplican al escribir. La X del editor cierra solamente
+el editor y devuelve el foco a la captura. Los botones de guardar/cargar perfiles
+siguen disponibles para mantener varios diseños.
 
 DISEÑO DE BAJA LATENCIA
 -----------------------
@@ -46,6 +53,7 @@ DISEÑO DE BAJA LATENCIA
 - Video crudo NV12/YUY2; no usa MJPEG.
 - Conserva únicamente el cuadro más reciente.
 - D3D11 Video Processor para conversión y escalado.
+- Direct2D/DirectWrite sobre el mismo backbuffer para los overlays.
 - Hilo de render separado de la interfaz.
 - Profundidad de presentación mínima y tearing opcional.
 - Audio WASAPI en el mismo proceso, con ganancia 0/+6/+12/+15/+18 dB.
@@ -55,6 +63,11 @@ ARCHIVOS QUE CREA
 -----------------
 DayaahCapture.ini  Recuerda la última configuración.
 DayaahCapture.log  Diagnóstico para reportar fallos.
+DayaahCapture.overlays.json  Último diseño de overlays (guardado automático).
+*.json             Perfiles de overlay donde decidas guardarlos.
+
+Conserva DayaahCapture.overlays.json junto al EXE al actualizar el programa.
+Los PNG se recuerdan por su ruta: conserva también las imágenes originales.
 
 REPORTAR UN ERROR
 -----------------
@@ -67,7 +80,7 @@ el programa, porque se crea uno nuevo en cada ejecución.
 
 NOTAS
 -----
-- La conversión es SDR BT.709 de rango limitado a RGB completo.
+- La conversión es SDR BT.709; el rango de entrada se elige desde el menú.
 - La salida de audio usa el dispositivo predeterminado de Windows.
 - +15/+18 dB pueden saturar si la entrada ya viene fuerte.
 - Si aparece tearing, elige "VSync (cola máxima: 1 cuadro)" antes de iniciar.

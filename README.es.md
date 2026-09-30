@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Versión 1.1.3" src="https://img.shields.io/badge/versión-1.1.3-53D7B2">
+  <img alt="Versión 1.3.0" src="https://img.shields.io/badge/versión-1.3.0-53D7B2">
   <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
   <img alt="Licencia MIT" src="https://img.shields.io/badge/licencia-MIT-53D7B2">
@@ -30,7 +30,7 @@ D3D11. El audio de la capturadora se reproduce por WASAPI dentro del mismo
 proceso. No necesita MPV, FFmpeg, instalador, cuentas ni servicios en segundo
 plano.
 
-La versión estable actual es la **v1.1.3**.
+La versión estable actual es la **v1.3.0**.
 
 ## Características
 
@@ -100,15 +100,17 @@ si Dayaah Capture no puede abrir el dispositivo.
 | Latencia mínima | Presenta inmediatamente; puede aparecer una línea de tearing |
 | VSync | Elimina el tearing; puede añadir hasta un intervalo de refresco |
 
-## Novedades de la v1.1.3
+## Novedades en la versión 1.3.0
 
-- Los mensajes de movimiento duplicados o sintéticos ya no impiden que el
-  cursor se oculte.
-- La pantalla completa restaura correctamente el estado previo normal o
-  maximizado de la ventana.
-- `Esc` ya no detiene el video ni el audio después de presionarlo repetidamente.
-- La ventana inicial tiene suficiente espacio vertical para mostrar toda la
-  línea de estado.
+- Menú contextual durante la captura mediante clic derecho.
+- Ganancia, silencio y VSync ajustables en vivo.
+- Selección en vivo del rango de entrada limitado (16-235) o completo (0-255).
+- Easter egg RGB inspirado en el modo disco de THPS4, activable durante la captura
+  al escribir DISCO.
+- Editor separado de overlays con texto, reloj de 12/24 horas, PNG transparente,
+  estadísticas internas, arrastre, redimensionado, estilos, anclajes y perfiles JSON.
+- Cambio de resolución, FPS o formato crudo con reinicio controlado de la
+  captura y restauración automática si el dispositivo rechaza el modo.
 
 Consulta [CHANGELOG-ES.md](CHANGELOG-ES.md) para ver las notas completas del
 lanzamiento.
@@ -164,8 +166,6 @@ uno nuevo en cada ejecución.
 
 - Solo Windows x64.
 - Solo entrada cruda NV12/YUY2.
-- La conversión SDR actual usa entrada BT.709 de rango limitado y salida RGB de
-  rango completo.
 - El audio utiliza el dispositivo de reproducción predeterminado de Windows.
 - +15 y +18 dB pueden saturar una señal que ya venga fuerte.
 

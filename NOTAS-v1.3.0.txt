@@ -1,0 +1,15 @@
+Dayaah Capture 1.3.0 - Visor de capturadoras HDMI
+==================================================
+
+Versión estable con la captura de baja latencia y los arreglos de ventana
+de la 1.1.3, el menú contextual y el editor de overlays de la 1.2.
+
+- El modo disco RGB inspirado en THPS4 es un easter egg del teclado
+  durante la captura. El título indica cuándo está activo.
+- El menú permite cambiar ganancia, silencio, VSync, rango de color, modo
+  de video, overlays y pantalla completa.
+- El editor incluye texto, reloj, PNG y estadísticas, con perfiles JSON.
+- El lienzo del editor se denomina visor.
+- Si la GPU no admite el filtro de tono, el modo secreto muestra un aviso.
+
+Consulta LEEME.txt para instalación, controles y reporte de fallos.

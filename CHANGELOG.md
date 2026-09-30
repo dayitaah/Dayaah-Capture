@@ -1,6 +1,23 @@
 # Dayaah Capture Changelog
 
-**English** | [Español](CHANGELOG-ES.md)
+**English** | [Español](CHANGELOG.ES.md)
+
+## Version 1.3.0 — HDMI capture card viewer
+
+- THPS4-inspired RGB disco mode.
+- RGB disco mode is a hidden keyboard easter egg during capture. Its active
+  state appears in the window title; unsupported hardware displays a clear notice.
+- The context menu now focuses on day-to-day capture controls.
+- The overlay editor labels its canvas as a viewer.
+- Right-click context menu while capture is running.
+- Live gain, mute, VSync, and input-range controls.
+- Resolution, FPS, and raw-format switching with a controlled restart and
+  automatic rollback when the device rejects the change.
+- Separate overlay editor with text, 12/24-hour clock, PNGs, statistics,
+  drag/resize, styling, anchors, and JSON profiles.
+- Global overlay toggle in the context menu or with `F10`.
+- Automatic overlay save/restore and corrected loading of profiles containing text.
+- Live opacity/size input and editor close that returns focus to capture.
 
 ## Version 1.1.3
 
