@@ -1229,10 +1229,10 @@ private:
         startButton_ = CreateWindowExW(0, L"BUTTON", L"INICIAR CAPTURA",
                                        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                        48, 432, 750, 58, window_,
-                                       reinterpret_cast<HMENU>(IDC_START), instance_, nullptr);
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_START)), instance_, nullptr);
         statusText_ = CreateWindowExW(0, L"STATIC", L"Buscando dispositivos...",
                                       WS_CHILD | WS_VISIBLE, 48, 498, 750, 24,
-                                      window_, reinterpret_cast<HMENU>(IDC_STATUS), instance_, nullptr);
+                                      window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_STATUS)), instance_, nullptr);
         HWND controls[] = {videoCombo_, modeCombo_, audioCombo_, gainCombo_, syncCombo_, statusText_};
         for (HWND control : controls) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
@@ -1250,7 +1250,7 @@ private:
     HWND CreateCombo(int id, int x, int y, int width) {
         return CreateWindowExW(0, WC_COMBOBOXW, L"",
                                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                               x, y, width, 320, window_, reinterpret_cast<HMENU>(id),
+                               x, y, width, 320, window_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
                                instance_, nullptr);
     }
 
