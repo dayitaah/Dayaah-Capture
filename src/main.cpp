@@ -32,8 +32,15 @@
 #include <cstdio>
 #include <cstdarg>
 #include <deque>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
+#include "disco_effect.h"
+#include "disco_secret.h"
+#include "mode_selection.h"
+#include "overlay_editor.h"
+#include "overlay_renderer.h"
 #include "window_behavior.h"
 
 static const PROPERTYKEY kPkeyDeviceFriendlyName = {
@@ -179,13 +186,14 @@ public:
     ~D3DVideoRenderer() { Shutdown(); }
 
     HRESULT Initialize(HWND window, UINT32 inputWidth, UINT32 inputHeight,
-                       const GUID& subtype, bool lowLatency) {
+                       const GUID& subtype, bool lowLatency, bool inputFullRange) {
         Shutdown();
         window_ = window;
         inputWidth_ = inputWidth;
         inputHeight_ = inputHeight;
         inputFormat_ = subtype == MFVideoFormat_NV12 ? DXGI_FORMAT_NV12 : DXGI_FORMAT_YUY2;
-        lowLatency_ = lowLatency;
+        lowLatency_.store(lowLatency);
+        inputFullRange_.store(inputFullRange);
 
         UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
         D3D_FEATURE_LEVEL levels[] = {
@@ -224,7 +232,7 @@ public:
 
         allowTearing_ = false;
         IDXGIFactory5* factory5 = nullptr;
-        if (lowLatency_ && SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory5)))) {
+        if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory5)))) {
             BOOL supported = FALSE;
             if (SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
                                                         &supported, sizeof(supported)))) {
@@ -263,6 +271,7 @@ public:
 
         hr = device_->QueryInterface(IID_PPV_ARGS(&videoDevice_));
         if (SUCCEEDED(hr)) hr = context_->QueryInterface(IID_PPV_ARGS(&videoContext_));
+        if (SUCCEEDED(hr)) hr = overlayRenderer_.Initialize();
         if (FAILED(hr)) return hr;
 
         D3D11_TEXTURE2D_DESC inputDesc{};
@@ -279,15 +288,17 @@ public:
 
         hr = RebuildVideoProcessor(width, height);
         if (SUCCEEDED(hr)) {
-            LogLine(L"D3D11 listo: entrada %ux%u %s, tearing=%s",
+            LogLine(L"D3D11 listo: entrada %ux%u %s, tearing=%s, disco RGB=%s",
                     inputWidth_, inputHeight_, GuidFormatName(subtype).c_str(),
-                    allowTearing_ ? L"si" : L"no");
+                    allowTearing_ ? L"si" : L"no",
+                    hueFilterSupported_.load() ? L"si" : L"no");
         }
         return hr;
     }
 
     HRESULT Resize(UINT width, UINT height) {
         if (!swapChain_ || width < 16 || height < 16) return S_OK;
+        overlayRenderer_.BeforeResize();
         SafeRelease(outputView_);
         SafeRelease(inputView_);
         SafeRelease(processor_);
@@ -299,7 +310,9 @@ public:
         return RebuildVideoProcessor(width, height);
     }
 
-    HRESULT Render(const BYTE* data, size_t size, LONG sourceStride) {
+    HRESULT Render(const BYTE* data, size_t size, LONG sourceStride,
+                   const std::shared_ptr<const OverlayConfig>& overlayConfig,
+                   const OverlayStats& overlayStats) {
         if (!data || !inputTexture_ || !processor_ || !outputView_) return E_POINTER;
         const UINT rowPitch = inputFormat_ == DXGI_FORMAT_NV12 ? inputWidth_ : inputWidth_ * 2;
         const size_t expected = inputFormat_ == DXGI_FORMAT_NV12
@@ -310,16 +323,32 @@ public:
         context_->UpdateSubresource(inputTexture_, 0, nullptr, data, rowPitch,
                                     static_cast<UINT>(expected));
 
+        ApplyColorSpace();
+        ApplyDiscoEffect();
+
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = inputView_;
         HRESULT hr = videoContext_->VideoProcessorBlt(processor_, outputView_, 0, 1, &stream);
         if (FAILED(hr)) return hr;
-        return swapChain_->Present(lowLatency_ ? 0 : 1,
-                                   allowTearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+        hr = overlayRenderer_.Draw(overlayConfig, overlayStats, contentRect_);
+        if (FAILED(hr)) return hr;
+        const bool lowLatency = lowLatency_.load();
+        return swapChain_->Present(lowLatency ? 0 : 1,
+                                   lowLatency && allowTearing_
+                                       ? DXGI_PRESENT_ALLOW_TEARING : 0);
     }
 
+    void SetLowLatency(bool enabled) { lowLatency_.store(enabled); }
+    void SetInputFullRange(bool enabled) { inputFullRange_.store(enabled); }
+    void SetDiscoMode(bool enabled) {
+        const bool previous = discoMode_.exchange(enabled);
+        if (enabled && !previous) discoStartTick_.store(GetTickCount64());
+    }
+    bool SupportsDiscoMode() const { return hueFilterSupported_.load(); }
+
     void Shutdown() {
+        overlayRenderer_.Shutdown();
         SafeRelease(outputView_);
         SafeRelease(inputView_);
         SafeRelease(processor_);
@@ -330,11 +359,73 @@ public:
         SafeRelease(swapChain_);
         SafeRelease(context_);
         SafeRelease(device_);
+        colorSpaceApplied_ = false;
+        hueFilterSupported_.store(false);
+        saturationFilterSupported_ = false;
+        discoFilterApplied_ = false;
         window_ = nullptr;
     }
 
 private:
+    void ApplyColorSpace() {
+        if (!videoContext_ || !processor_) return;
+        const bool fullRange = inputFullRange_.load();
+        if (colorSpaceApplied_ && appliedInputFullRange_ == fullRange) return;
+
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
+        inputColor.YCbCr_Matrix = 1;
+        inputColor.Nominal_Range = fullRange
+            ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255
+            : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColor{};
+        outputColor.RGB_Range = 0;
+        outputColor.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+        videoContext_->VideoProcessorSetStreamColorSpace(processor_, 0, &inputColor);
+        videoContext_->VideoProcessorSetOutputColorSpace(processor_, &outputColor);
+        appliedInputFullRange_ = fullRange;
+        colorSpaceApplied_ = true;
+    }
+
+    void ApplyDiscoEffect() {
+        if (!videoContext_ || !processor_) return;
+        const bool enabled = discoMode_.load() && hueFilterSupported_.load();
+        if (!enabled) {
+            if (discoFilterApplied_) {
+                videoContext_->VideoProcessorSetStreamFilter(
+                    processor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_HUE,
+                    FALSE, hueRange_.Default);
+                if (saturationFilterSupported_) {
+                    videoContext_->VideoProcessorSetStreamFilter(
+                        processor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_SATURATION,
+                        FALSE, saturationRange_.Default);
+                }
+                discoFilterApplied_ = false;
+            }
+            return;
+        }
+
+        const ULONGLONG start = discoStartTick_.load();
+        const ULONGLONG elapsed = GetTickCount64() - start;
+        const int hue = ComputeDiscoHueLevel(
+            hueRange_.Minimum, hueRange_.Maximum, elapsed);
+        videoContext_->VideoProcessorSetStreamFilter(
+            processor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_HUE, TRUE, hue);
+
+        if (!discoFilterApplied_ && saturationFilterSupported_) {
+            const int saturation = ComputeDiscoSaturationLevel(
+                saturationRange_.Default, saturationRange_.Maximum);
+            videoContext_->VideoProcessorSetStreamFilter(
+                processor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_SATURATION,
+                TRUE, saturation);
+        }
+        discoFilterApplied_ = true;
+    }
+
     HRESULT RebuildVideoProcessor(UINT outputWidth, UINT outputHeight) {
+        colorSpaceApplied_ = false;
+        hueFilterSupported_.store(false);
+        saturationFilterSupported_ = false;
+        discoFilterApplied_ = false;
         D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
         content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
         content.InputFrameRate.Numerator = 60;
@@ -357,6 +448,20 @@ private:
         }
         if (SUCCEEDED(hr)) hr = videoDevice_->CreateVideoProcessor(processorEnum_, 0, &processor_);
         if (FAILED(hr)) return hr;
+
+        D3D11_VIDEO_PROCESSOR_CAPS processorCaps{};
+        if (SUCCEEDED(processorEnum_->GetVideoProcessorCaps(&processorCaps))) {
+            if ((processorCaps.FilterCaps & D3D11_VIDEO_PROCESSOR_FILTER_CAPS_HUE) &&
+                SUCCEEDED(processorEnum_->GetVideoProcessorFilterRange(
+                    D3D11_VIDEO_PROCESSOR_FILTER_HUE, &hueRange_))) {
+                hueFilterSupported_.store(true);
+            }
+            if ((processorCaps.FilterCaps & D3D11_VIDEO_PROCESSOR_FILTER_CAPS_SATURATION) &&
+                SUCCEEDED(processorEnum_->GetVideoProcessorFilterRange(
+                    D3D11_VIDEO_PROCESSOR_FILTER_SATURATION, &saturationRange_))) {
+                saturationFilterSupported_ = true;
+            }
+        }
 
         D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDesc{};
         inputViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
@@ -393,28 +498,34 @@ private:
         videoContext_->VideoProcessorSetStreamSourceRect(processor_, 0, TRUE, &source);
         videoContext_->VideoProcessorSetStreamDestRect(processor_, 0, TRUE, &target);
         videoContext_->VideoProcessorSetOutputTargetRect(processor_, TRUE, &target);
+        contentRect_ = target;
 
-        D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
-        inputColor.YCbCr_Matrix = 1; // BT.709
-        inputColor.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
-        D3D11_VIDEO_PROCESSOR_COLOR_SPACE outputColor{};
-        outputColor.RGB_Range = 0;
-        outputColor.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
-        videoContext_->VideoProcessorSetStreamColorSpace(processor_, 0, &inputColor);
-        videoContext_->VideoProcessorSetOutputColorSpace(processor_, &outputColor);
+        ApplyColorSpace();
 
         D3D11_VIDEO_COLOR clear{};
         clear.RGBA.A = 1.0f;
         videoContext_->VideoProcessorSetOutputBackgroundColor(processor_, FALSE, &clear);
-        return S_OK;
+        return overlayRenderer_.CreateTarget(swapChain_);
     }
 
     HWND window_ = nullptr;
     UINT32 inputWidth_ = 0;
     UINT32 inputHeight_ = 0;
     DXGI_FORMAT inputFormat_ = DXGI_FORMAT_UNKNOWN;
-    bool lowLatency_ = true;
+    std::atomic<bool> lowLatency_{true};
+    std::atomic<bool> inputFullRange_{false};
+    std::atomic<bool> discoMode_{false};
+    std::atomic<ULONGLONG> discoStartTick_{0};
+    std::atomic<bool> hueFilterSupported_{false};
+    D3D11_VIDEO_PROCESSOR_FILTER_RANGE hueRange_{};
+    D3D11_VIDEO_PROCESSOR_FILTER_RANGE saturationRange_{};
+    bool colorSpaceApplied_ = false;
+    bool appliedInputFullRange_ = false;
+    bool saturationFilterSupported_ = false;
+    bool discoFilterApplied_ = false;
     bool allowTearing_ = false;
+    RECT contentRect_{};
+    OverlayRenderer overlayRenderer_;
     ID3D11Device* device_ = nullptr;
     ID3D11DeviceContext* context_ = nullptr;
     IDXGISwapChain1* swapChain_ = nullptr;
@@ -657,8 +768,8 @@ private:
         }
 
         const size_t availableFrames = (outputStereo_.size() - outputRead_) / 2;
-        const size_t maximumFrames = renderFormat_->nSamplesPerSec / 25; // 40 ms ceiling.
-        const size_t targetFrames = renderFormat_->nSamplesPerSec / 100; // Return to 10 ms.
+        const size_t maximumFrames = renderFormat_->nSamplesPerSec / 25;
+        const size_t targetFrames = renderFormat_->nSamplesPerSec / 100;
         if (availableFrames > maximumFrames) {
             outputRead_ += (availableFrames - targetFrames) * 2;
             LogLine(L"Audio: cola vieja descartada para volver al directo");
@@ -752,7 +863,18 @@ enum : int {
     IDC_GAIN = 1004,
     IDC_SYNC = 1005,
     IDC_START = 1006,
-    IDC_STATUS = 1007
+    IDC_STATUS = 1007,
+    IDM_FULLSCREEN = 2000,
+    IDM_MUTE,
+    IDM_VSYNC,
+    IDM_COLOR_LIMITED,
+    IDM_COLOR_FULL,
+    IDM_OVERLAY_TOGGLE,
+    IDM_OVERLAY_EDITOR,
+    IDM_GAIN = 2500,
+    IDM_RESOLUTION = 2600,
+    IDM_FPS = 2700,
+    IDM_FORMAT = 2800
 };
 
 constexpr UINT WM_DAYAAH_FRAME = WM_APP + 17;
@@ -760,8 +882,14 @@ constexpr UINT WM_DAYAAH_CAPTURE_ERROR = WM_APP + 18;
 
 class DayaahApp {
 public:
-    DayaahApp() { InitializeCriticalSection(&frameLock_); }
+    DayaahApp() {
+        InitializeCriticalSection(&frameLock_);
+        auto initial = std::make_shared<OverlayConfig>();
+        std::atomic_store(&overlayConfig_, std::shared_ptr<const OverlayConfig>(initial));
+    }
     ~DayaahApp() {
+        overlayEditor_.Close();
+        FlushOverlaySettings(false);
         SetCaptureCursorHidden(false);
         StopCapture();
         ReleaseDevices();
@@ -812,7 +940,8 @@ public:
                                                             LR_DEFAULTCOLOR));
         if (!RegisterClassExW(&windowClass)) return HRESULT_FROM_WIN32(GetLastError());
 
-        window_ = CreateWindowExW(0, windowClass.lpszClassName, L"Dayaah Capture 1.1.3",
+        window_ = CreateWindowExW(0, windowClass.lpszClassName,
+                                  L"Dayaah Capture 1.3.0",
                                   WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                   860, 630, nullptr, nullptr, instance_, this);
         if (!window_) return HRESULT_FROM_WIN32(GetLastError());
@@ -827,6 +956,7 @@ public:
 
         EnumerateDevices();
         PopulateControls();
+        RestoreOverlaySettings();
         return S_OK;
     }
 
@@ -890,9 +1020,12 @@ public:
         if (FAILED(hr)) return;
 
         EnterCriticalSection(&frameLock_);
+        if (framePending_) discardedFrames_++;
         latestFrame_.swap(incoming);
+        framePending_ = true;
         LeaveCriticalSection(&frameLock_);
         receivedFrames_++;
+        lastFrameArrivalTick_.store(GetTickCount64());
         if (frameReadyEvent_) SetEvent(frameReadyEvent_);
     }
 
@@ -929,6 +1062,24 @@ private:
         switch (message) {
         case WM_COMMAND:
             return OnCommand(LOWORD(wParam), HIWORD(wParam));
+        case WM_CONTEXTMENU:
+            if (capturingUi_ && running_.load()) ShowContextMenu(lParam);
+            return 0;
+        case WM_ENTERMENULOOP:
+            menuOpen_ = true;
+            SetCaptureCursorHidden(false);
+            return 0;
+        case WM_EXITMENULOOP:
+            menuOpen_ = false;
+            lastMouseMove_ = GetTickCount64();
+            hasLastCursorPosition_ = false;
+            return 0;
+        case WM_ENTERIDLE:
+            if (wParam == MSGF_MENU) {
+                menuOpen_ = true;
+                SetCaptureCursorHidden(false);
+            }
+            return 0;
         case WM_DAYAAH_CAPTURE_ERROR: {
             HRESULT hr = captureError_.load();
             if (fullscreen_) ToggleFullscreen();
@@ -956,10 +1107,11 @@ private:
         case WM_TIMER:
             if (wParam == 1) UpdateFpsTitle();
             else if (wParam == 2) UpdateCursorVisibility();
+            else if (wParam == 3) FlushOverlaySettings();
             return 0;
         case WM_SETCURSOR:
             if (LOWORD(lParam) == HTCLIENT) {
-                const bool hide = running_.load() && cursorHidden_ &&
+                const bool hide = !menuOpen_ && running_.load() && cursorHidden_ &&
                                   GetForegroundWindow() == window_;
                 SetCursor(hide ? hiddenCursor_ : visibleCursor_);
                 return TRUE;
@@ -996,6 +1148,9 @@ private:
             return 0;
         case WM_KEYDOWN:
             if (wParam == VK_F11 && !(lParam & (1LL << 30))) ToggleFullscreen();
+            else if (wParam == VK_F10 && !(lParam & (1LL << 30)) && running_.load()) {
+                ToggleOverlays();
+            }
             else if (wParam == VK_ESCAPE && !(lParam & (1LL << 30))) {
                 const EscapeWindowAction action = DecideEscapeWindowAction(
                     running_.load(), fullscreen_, IsZoomed(window_) != FALSE);
@@ -1005,6 +1160,12 @@ private:
             } else if (wParam == 'M' && running_.load()) {
                 audio_.ToggleMute();
                 UpdateFpsTitle();
+            }
+            return 0;
+        case WM_CHAR:
+            if (running_.load() && !menuOpen_ && discoSecret_.Input(
+                    static_cast<wchar_t>(wParam), GetTickCount64())) {
+                ToggleDiscoMode();
             }
             return 0;
         case WM_LBUTTONDBLCLK:
@@ -1030,9 +1191,17 @@ private:
             PaintSetup();
             return 0;
         case WM_CLOSE:
+            overlayEditor_.Close();
+            FlushOverlaySettings();
             SetCaptureCursorHidden(false);
             StopCapture();
             DestroyWindow(window_);
+            return 0;
+        case WM_QUERYENDSESSION:
+            FlushOverlaySettings(false);
+            return TRUE;
+        case WM_ENDSESSION:
+            if (wParam) FlushOverlaySettings(false);
             return 0;
         case WM_DESTROY:
             SetCaptureCursorHidden(false);
@@ -1283,6 +1452,9 @@ private:
         ComboBox_SetCurSel(syncCombo_,
                            GetPrivateProfileIntW(L"capture", L"ultra_low_latency", 1,
                                                  IniPath().c_str()) ? 0 : 1);
+        activeInputFullRange_.store(
+            GetPrivateProfileIntW(L"capture", L"input_full_range", 0,
+                                  IniPath().c_str()) == 1);
 
         if (videoDevices_.empty()) {
             SetWindowTextW(statusText_, L"No encontré una capturadora con salida NV12 o YUY2.");
@@ -1290,7 +1462,7 @@ private:
         } else {
             wchar_t status[180]{};
             _snwprintf_s(status, _countof(status), _TRUNCATE,
-                         L"Listo: %zu modos crudos disponibles. F11: pantalla completa · Esc: volver · M: silencio",
+                         L"Listo: %zu modos crudos. Clic derecho: opciones · F11: pantalla completa · Esc: volver · M: silencio",
                          videoDevices_[preferredVideo].modes.size());
             SetWindowTextW(statusText_, status);
         }
@@ -1339,6 +1511,365 @@ private:
         return 0;
     }
 
+    static int FormatCode(const GUID& subtype) {
+        if (subtype == MFVideoFormat_NV12) return 1;
+        if (subtype == MFVideoFormat_YUY2) return 2;
+        return 0;
+    }
+
+    int ClosestModeIndex(const ModeCandidate& requested, ModeAxis axis) const {
+        if (activeDeviceIndex_ < 0 ||
+            activeDeviceIndex_ >= static_cast<int>(videoDevices_.size())) return -1;
+        const auto& modes = videoDevices_[activeDeviceIndex_].modes;
+        std::vector<ModeCandidate> candidates;
+        candidates.reserve(modes.size());
+        for (const VideoMode& mode : modes) {
+            candidates.push_back({mode.width, mode.height, mode.Fps(), FormatCode(mode.subtype)});
+        }
+        const ModeCandidate current{activeMode_.width, activeMode_.height,
+                                    activeMode_.Fps(), FormatCode(activeMode_.subtype)};
+        return SelectClosestMode(candidates, current, requested, axis);
+    }
+
+    void SwitchCaptureMode(int modeIndex) {
+        if (!running_.load() || activeDeviceIndex_ < 0 ||
+            activeDeviceIndex_ >= static_cast<int>(videoDevices_.size())) return;
+        const auto& modes = videoDevices_[activeDeviceIndex_].modes;
+        if (modeIndex < 0 || modeIndex >= static_cast<int>(modes.size()) ||
+            modes[modeIndex].Key() == activeMode_.Key()) return;
+
+        const int previousMode = ComboBox_GetCurSel(modeCombo_);
+        const bool previousMuted = audio_.IsMuted();
+        const std::wstring previousLabel = activeMode_.Label();
+        const std::wstring requestedLabel = modes[modeIndex].Label();
+        LogLine(L"Cambio de modo solicitado: %s -> %s",
+                previousLabel.c_str(), requestedLabel.c_str());
+
+        ComboBox_SetCurSel(modeCombo_, modeIndex);
+        StopCapture();
+        HRESULT hr = StartCapture();
+        if (SUCCEEDED(hr)) {
+            if (previousMuted && !audio_.IsMuted()) audio_.ToggleMute();
+            LogLine(L"Cambio de modo completado: %s", requestedLabel.c_str());
+            return;
+        }
+
+        const HRESULT requestedHr = hr;
+        LogLine(L"Cambio de modo fallo; intentando restaurar: %s", HrText(hr).c_str());
+        ComboBox_SetCurSel(modeCombo_, previousMode);
+        const HRESULT restoreHr = StartCapture();
+        if (SUCCEEDED(restoreHr) && previousMuted && !audio_.IsMuted()) audio_.ToggleMute();
+        std::wstring message = L"La capturadora rechazó el modo:\n\n" + requestedLabel +
+            L"\n\n" + HrText(requestedHr);
+        if (SUCCEEDED(restoreHr)) {
+            message += L"\n\nSe restauró el modo anterior.";
+        } else {
+            message += L"\n\nTampoco pude restaurar el modo anterior. Volví a la configuración.";
+            if (fullscreen_) ToggleFullscreen();
+            ShowSetup(true);
+        }
+        MessageBoxW(window_, message.c_str(), L"Dayaah Capture - cambio de modo", MB_ICONWARNING);
+    }
+
+    void BuildModeMenu(HMENU root) {
+        auto entry = [](HMENU menu, UINT id, const wchar_t* name, bool checked = false) {
+            AppendMenuW(menu, MF_STRING | (checked ? MF_CHECKED : 0), id, name);
+        };
+        menuResolutions_.clear();
+        menuFps_.clear();
+        menuFormats_.clear();
+        if (activeDeviceIndex_ < 0 ||
+            activeDeviceIndex_ >= static_cast<int>(videoDevices_.size())) return;
+
+        const auto& modes = videoDevices_[activeDeviceIndex_].modes;
+        for (const VideoMode& mode : modes) {
+            const auto resolution = std::make_pair(mode.width, mode.height);
+            if (std::find(menuResolutions_.begin(), menuResolutions_.end(), resolution) ==
+                menuResolutions_.end()) {
+                menuResolutions_.push_back(resolution);
+            }
+            if (std::none_of(menuFps_.begin(), menuFps_.end(),
+                             [&](double fps) { return std::fabs(fps - mode.Fps()) < 0.01; })) {
+                menuFps_.push_back(mode.Fps());
+            }
+            if (std::none_of(menuFormats_.begin(), menuFormats_.end(),
+                             [&](const GUID& format) { return format == mode.subtype; })) {
+                menuFormats_.push_back(mode.subtype);
+            }
+        }
+
+        HMENU modeMenu = CreatePopupMenu();
+        HMENU resolutionMenu = CreatePopupMenu();
+        HMENU fpsMenu = CreatePopupMenu();
+        HMENU formatMenu = CreatePopupMenu();
+        if (!modeMenu || !resolutionMenu || !fpsMenu || !formatMenu) {
+            if (modeMenu) DestroyMenu(modeMenu);
+            if (resolutionMenu) DestroyMenu(resolutionMenu);
+            if (fpsMenu) DestroyMenu(fpsMenu);
+            if (formatMenu) DestroyMenu(formatMenu);
+            return;
+        }
+
+        for (size_t i = 0; i < menuResolutions_.size() && i < 100; ++i) {
+            wchar_t label[64]{};
+            _snwprintf_s(label, _countof(label), _TRUNCATE, L"%u x %u",
+                         menuResolutions_[i].first, menuResolutions_[i].second);
+            entry(resolutionMenu, IDM_RESOLUTION + static_cast<UINT>(i), label,
+                  activeMode_.width == menuResolutions_[i].first &&
+                  activeMode_.height == menuResolutions_[i].second);
+        }
+        for (size_t i = 0; i < menuFps_.size() && i < 100; ++i) {
+            wchar_t label[64]{};
+            if (std::fabs(menuFps_[i] - std::round(menuFps_[i])) < 0.01) {
+                _snwprintf_s(label, _countof(label), _TRUNCATE, L"%.0f fps", menuFps_[i]);
+            } else {
+                _snwprintf_s(label, _countof(label), _TRUNCATE, L"%.2f fps", menuFps_[i]);
+            }
+            entry(fpsMenu, IDM_FPS + static_cast<UINT>(i), label,
+                  std::fabs(activeMode_.Fps() - menuFps_[i]) < 0.01);
+        }
+        for (size_t i = 0; i < menuFormats_.size() && i < 100; ++i) {
+            const std::wstring label = GuidFormatName(menuFormats_[i]);
+            entry(formatMenu, IDM_FORMAT + static_cast<UINT>(i), label.c_str(),
+                  activeMode_.subtype == menuFormats_[i]);
+        }
+
+        AppendMenuW(modeMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(resolutionMenu), L"Resolución");
+        AppendMenuW(modeMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(fpsMenu), L"FPS");
+        AppendMenuW(modeMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(formatMenu), L"Formato crudo");
+        AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(modeMenu),
+                    L"Modo de captura (reinicia)");
+    }
+
+    void ShowContextMenu(LPARAM position) {
+        menuOpen_ = true;
+        SetCaptureCursorHidden(false);
+
+        POINT point{GET_X_LPARAM(position), GET_Y_LPARAM(position)};
+        if (point.x == -1 && point.y == -1) {
+            RECT rect{};
+            GetClientRect(window_, &rect);
+            point = {(rect.right - rect.left) / 2, (rect.bottom - rect.top) / 2};
+            ClientToScreen(window_, &point);
+        }
+
+        HMENU menu = CreatePopupMenu();
+        if (!menu) {
+            menuOpen_ = false;
+            lastMouseMove_ = GetTickCount64();
+            return;
+        }
+        auto entry = [](HMENU target, UINT id, const wchar_t* name, bool checked = false) {
+            AppendMenuW(target, MF_STRING | (checked ? MF_CHECKED : 0), id, name);
+        };
+
+        HMENU gain = CreatePopupMenu();
+        if (gain) {
+            const int gains[] = {0, 6, 12, 15, 18};
+            for (int i = 0; i < 5; ++i) {
+                const std::wstring label = (gains[i] ? L"+" : L"") +
+                                           std::to_wstring(gains[i]) + L" dB";
+                entry(gain, IDM_GAIN + i, label.c_str(), SelectedGain() == gains[i]);
+            }
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(gain),
+                        L"Amplificación de audio");
+        }
+        entry(menu, IDM_MUTE, L"Silencio\tM", audio_.IsMuted());
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
+        entry(menu, IDM_VSYNC, L"VSync (máximo 1 cuadro)", !activeLowLatency_.load());
+        HMENU colorRange = CreatePopupMenu();
+        if (colorRange) {
+            entry(colorRange, IDM_COLOR_LIMITED, L"Limitado (16-235)",
+                  !activeInputFullRange_.load());
+            entry(colorRange, IDM_COLOR_FULL, L"Completo (0-255)",
+                  activeInputFullRange_.load());
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(colorRange),
+                        L"Rango de color de entrada");
+        }
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        const auto overlay = std::atomic_load(&overlayConfig_);
+        entry(menu, IDM_OVERLAY_TOGGLE, L"Mostrar overlays\tF10",
+              overlay && overlay->enabled);
+        entry(menu, IDM_OVERLAY_EDITOR, L"Editor de overlays...");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        BuildModeMenu(menu);
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        entry(menu, IDM_FULLSCREEN, L"Pantalla completa\tF11", fullscreen_);
+
+        const UINT selected = TrackPopupMenu(menu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_NOANIMATION,
+            point.x, point.y, 0, window_, nullptr);
+        DestroyMenu(menu);
+        menuOpen_ = false;
+        lastMouseMove_ = GetTickCount64();
+        hasLastCursorPosition_ = false;
+        SetCaptureCursorHidden(false);
+        if (selected && running_.load()) OnMenuCommand(selected);
+    }
+
+    void OnMenuCommand(UINT id) {
+        if (!running_.load()) return;
+        if (id >= IDM_RESOLUTION && id < IDM_RESOLUTION + 100) {
+            const size_t index = id - IDM_RESOLUTION;
+            if (index < menuResolutions_.size()) {
+                ModeCandidate requested{};
+                requested.width = menuResolutions_[index].first;
+                requested.height = menuResolutions_[index].second;
+                SwitchCaptureMode(ClosestModeIndex(requested, ModeAxis::Resolution));
+            }
+            return;
+        }
+        if (id >= IDM_FPS && id < IDM_FPS + 100) {
+            const size_t index = id - IDM_FPS;
+            if (index < menuFps_.size()) {
+                ModeCandidate requested{};
+                requested.fps = menuFps_[index];
+                SwitchCaptureMode(ClosestModeIndex(requested, ModeAxis::Fps));
+            }
+            return;
+        }
+        if (id >= IDM_FORMAT && id < IDM_FORMAT + 100) {
+            const size_t index = id - IDM_FORMAT;
+            if (index < menuFormats_.size()) {
+                ModeCandidate requested{};
+                requested.format = FormatCode(menuFormats_[index]);
+                SwitchCaptureMode(ClosestModeIndex(requested, ModeAxis::Format));
+            }
+            return;
+        }
+
+        if (id == IDM_FULLSCREEN) {
+            ToggleFullscreen();
+        } else if (id == IDM_MUTE) {
+            audio_.ToggleMute();
+            UpdateFpsTitle();
+        } else if (id == IDM_VSYNC) {
+            const bool newLowLatency = !activeLowLatency_.load();
+            activeLowLatency_.store(newLowLatency);
+            if (renderer_) renderer_->SetLowLatency(newLowLatency);
+            ComboBox_SetCurSel(syncCombo_, newLowLatency ? 0 : 1);
+            WritePrivateProfileStringW(L"capture", L"ultra_low_latency",
+                                       newLowLatency ? L"1" : L"0", IniPath().c_str());
+            LogLine(L"Sincronización cambiada en vivo: %s",
+                    newLowLatency ? L"VSync OFF / intervalo 0" : L"VSync ON / intervalo 1");
+        } else if (id == IDM_OVERLAY_TOGGLE) {
+            ToggleOverlays();
+        } else if (id == IDM_OVERLAY_EDITOR) {
+            OpenOverlayEditor();
+        } else if (id == IDM_COLOR_LIMITED || id == IDM_COLOR_FULL) {
+            const bool fullRange = id == IDM_COLOR_FULL;
+            activeInputFullRange_.store(fullRange);
+            if (renderer_) renderer_->SetInputFullRange(fullRange);
+            WritePrivateProfileStringW(L"capture", L"input_full_range",
+                                       fullRange ? L"1" : L"0", IniPath().c_str());
+            LogLine(L"Rango de entrada cambiado en vivo: %s",
+                    fullRange ? L"Completo 0-255" : L"Limitado 16-235");
+        } else if (id >= IDM_GAIN && id < IDM_GAIN + 5) {
+            ComboBox_SetCurSel(gainCombo_, id - IDM_GAIN);
+            audio_.SetGain(SelectedGain());
+            const std::wstring value = std::to_wstring(SelectedGain());
+            WritePrivateProfileStringW(L"capture", L"gain_db", value.c_str(), IniPath().c_str());
+        }
+    }
+
+    void ToggleDiscoMode() {
+        if (!renderer_ || !renderer_->SupportsDiscoMode()) {
+            LogLine(L"Modo disco RGB no compatible con el procesador de video actual");
+            MessageBoxW(window_, L"Esta GPU no admite el filtro de tono necesario para el modo disco RGB.",
+                        L"Dayaah Capture 1.3.0", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        const bool enabled = !activeDiscoMode_.load();
+        activeDiscoMode_.store(enabled);
+        renderer_->SetDiscoMode(enabled);
+        SetWindowTextW(window_, enabled ? L"Dayaah Capture 1.3.0 - DISCO RGB ACTIVADO"
+                                        : L"Dayaah Capture 1.3.0 - DISCO RGB DESACTIVADO");
+        LogLine(L"Modo disco RGB: %s", enabled ? L"activado" : L"desactivado");
+    }
+
+    void PublishOverlayConfig(const OverlayConfig& value) {
+        auto next = std::make_shared<OverlayConfig>(value);
+        std::atomic_store(&overlayConfig_, std::shared_ptr<const OverlayConfig>(next));
+        overlaySettingsDirty_ = true;
+        if (!SetTimer(window_, 3, 350, nullptr)) FlushOverlaySettings();
+    }
+
+    std::wstring OverlaySettingsPath() const {
+        return JoinPath(ModuleDirectory(), L"DayaahCapture.overlays.json");
+    }
+
+    void RestoreOverlaySettings() {
+        const std::wstring path = OverlaySettingsPath();
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES &&
+            (GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND)) return;
+        OverlayConfig restored{};
+        std::wstring error;
+        if (!overlay_profile::Load(path, restored, error)) {
+            LogLine(L"No se pudo restaurar el overlay: %s", error.c_str());
+            MessageBoxW(window_, (L"No pude restaurar los overlays guardados.\n\n" + error +
+                        L"\n\nEl archivo original no se ha modificado.").c_str(),
+                        L"Dayaah Capture - overlays", MB_ICONWARNING);
+            return;
+        }
+        const std::wstring missing = OverlayEditor::PrepareProfileImages(restored, path);
+        std::atomic_store(&overlayConfig_,
+            std::shared_ptr<const OverlayConfig>(std::make_shared<OverlayConfig>(std::move(restored))));
+        overlaySettingsDirty_ = false;
+        if (!missing.empty()) {
+            LogLine(L"Overlays restaurados con imágenes ausentes: %s", missing.c_str());
+            MessageBoxW(window_, (L"Se restauraron los overlays, pero faltan estas imágenes:" +
+                        missing + L"\n\nConserva los PNG en su ubicación original.").c_str(),
+                        L"Dayaah Capture - overlays", MB_ICONWARNING);
+        }
+    }
+
+    void FlushOverlaySettings(bool showError = true) {
+        if (IsWindow(window_)) KillTimer(window_, 3);
+        if (!overlaySettingsDirty_) return;
+        const auto config = std::atomic_load(&overlayConfig_);
+        if (!config) return;
+        const std::wstring path = OverlaySettingsPath();
+        std::wstring error;
+        if (overlay_profile::Save(path, *config, error)) {
+            overlaySettingsDirty_ = false;
+            overlaySaveErrorShown_ = false;
+        } else {
+            LogLine(L"No se pudo guardar el overlay: %s", error.c_str());
+            if (showError && !overlaySaveErrorShown_ && IsWindow(window_)) {
+                overlaySaveErrorShown_ = true;
+                MessageBoxW(window_, (L"Los cambios siguen activos, pero no pude guardarlos para "
+                            L"la próxima sesión.\n\n" + path + L"\n\n" + error +
+                            L"\n\nExtrae la aplicación en una carpeta donde puedas escribir.").c_str(),
+                            L"Dayaah Capture - overlays", MB_ICONWARNING);
+            }
+        }
+    }
+
+    void ToggleOverlays() {
+        const auto current = std::atomic_load(&overlayConfig_);
+        OverlayConfig next = current ? *current : OverlayConfig{};
+        next.enabled = !next.enabled;
+        ++next.revision;
+        PublishOverlayConfig(next);
+        overlayEditor_.SetEnabled(next.enabled);
+        LogLine(L"Overlays: %s", next.enabled ? L"activados" : L"desactivados");
+    }
+
+    void OpenOverlayEditor() {
+        SetCaptureCursorHidden(false);
+        overlayEditor_.Open(instance_, window_, std::atomic_load(&overlayConfig_),
+                            [this](const OverlayConfig& value) {
+                                PublishOverlayConfig(value);
+                            }, [this]() {
+                                FlushOverlaySettings();
+                                lastMouseMove_ = GetTickCount64();
+                                hasLastCursorPosition_ = false;
+                                SetCaptureCursorHidden(false);
+                            });
+    }
+
     int SelectedGain() const {
         const int gains[] = {0, 6, 12, 15, 18};
         int selected = ComboBox_GetCurSel(gainCombo_);
@@ -1351,6 +1882,7 @@ private:
 
     HRESULT StartCapture() {
         if (running_.load()) return S_OK;
+        discoSecret_.Reset();
         IMFAttributes* attributes = nullptr;
         IMFMediaType* selectedType = nullptr;
         int deviceIndex = ComboBox_GetCurSel(videoCombo_);
@@ -1360,17 +1892,24 @@ private:
         activeMode_ = videoDevices_[deviceIndex].modes[modeIndex];
         activeDeviceIndex_ = deviceIndex;
         const bool lowLatency = LowLatencySelected();
+        activeLowLatency_.store(lowLatency);
         SaveSettings(deviceIndex, modeIndex);
 
         ShowSetup(false);
+        if (GetForegroundWindow() == window_) SetFocus(window_);
         renderer_ = new D3DVideoRenderer();
         HRESULT hr = renderer_->Initialize(window_, activeMode_.width, activeMode_.height,
-                                           activeMode_.subtype, lowLatency);
+                                           activeMode_.subtype, lowLatency,
+                                           activeInputFullRange_.load());
         if (FAILED(hr)) {
             delete renderer_;
             renderer_ = nullptr;
             ShowSetup(true);
             return hr;
+        }
+        if (activeDiscoMode_.load()) {
+            if (renderer_->SupportsDiscoMode()) renderer_->SetDiscoMode(true);
+            else activeDiscoMode_.store(false);
         }
 
         hr = videoDevices_[deviceIndex].activate->ActivateObject(IID_PPV_ARGS(&mediaSource_));
@@ -1402,6 +1941,17 @@ private:
             hr = HRESULT_FROM_WIN32(GetLastError());
             goto failed;
         }
+        receivedFrames_ = 0;
+        renderedFrames_ = 0;
+        discardedFrames_ = 0;
+        receivedFps_ = 0;
+        presentedFps_ = 0;
+        lastReceivedFpsFrames_ = 0;
+        lastPresentedFpsFrames_ = 0;
+        lastFrameArrivalTick_.store(GetTickCount64());
+        EnterCriticalSection(&frameLock_);
+        framePending_ = false;
+        LeaveCriticalSection(&frameLock_);
         running_.store(true);
         renderThread_ = CreateThread(nullptr, 0, RenderThreadEntry, this, 0, nullptr);
         if (!renderThread_) {
@@ -1411,10 +1961,6 @@ private:
         lastMouseMove_ = GetTickCount64();
         hasLastCursorPosition_ = false;
         SetCaptureCursorHidden(false);
-        receivedFrames_ = 0;
-        renderedFrames_ = 0;
-        lastFpsFrames_ = 0;
-
         {
             int audioIndex = ComboBox_GetCurSel(audioCombo_);
             if (audioIndex > 0 && audioIndex <= static_cast<int>(audioDevices_.size())) {
@@ -1438,6 +1984,7 @@ private:
     }
 
     void StopCapture() {
+        discoSecret_.Reset();
         if (!running_.exchange(false) && !reader_ && !renderer_ && !renderThread_) return;
         audio_.Stop();
         if (reader_) {
@@ -1485,8 +2032,9 @@ private:
         EnterCriticalSection(&frameLock_);
         latestFrame_.clear();
         renderFrame_.clear();
+        framePending_ = false;
         LeaveCriticalSection(&frameLock_);
-        SetWindowTextW(window_, L"Dayaah Capture");
+        SetWindowTextW(window_, L"Dayaah Capture 1.3.0");
         LogLine(L"Captura detenida");
     }
 
@@ -1514,12 +2062,30 @@ private:
                 break;
             }
 
+            bool haveFrame = false;
             EnterCriticalSection(&frameLock_);
-            latestFrame_.swap(renderFrame_);
+            if (framePending_) {
+                latestFrame_.swap(renderFrame_);
+                framePending_ = false;
+                haveFrame = true;
+            }
             LeaveCriticalSection(&frameLock_);
-            if (!renderer_ || renderFrame_.empty() || IsIconic(window_)) continue;
+            if (!haveFrame || !renderer_ || renderFrame_.empty() || IsIconic(window_)) continue;
 
-            const HRESULT hr = renderer_->Render(renderFrame_.data(), renderFrame_.size(), sourceStride_);
+            OverlayStats stats{};
+            stats.receivedFrames = receivedFrames_.load();
+            stats.presentedFrames = renderedFrames_.load();
+            stats.discardedFrames = discardedFrames_.load();
+            stats.receivedFps = receivedFps_.load();
+            stats.presentedFps = presentedFps_.load();
+            stats.lastFrameAgeMs = GetTickCount64() - lastFrameArrivalTick_.load();
+            stats.width = activeMode_.width;
+            stats.height = activeMode_.height;
+            stats.sourceFps = activeMode_.Fps();
+            stats.format = GuidFormatName(activeMode_.subtype);
+            stats.lowLatency = activeLowLatency_.load();
+            const HRESULT hr = renderer_->Render(renderFrame_.data(), renderFrame_.size(), sourceStride_,
+                                                 std::atomic_load(&overlayConfig_), stats);
             if (SUCCEEDED(hr)) renderedFrames_++;
             else if (hr != DXGI_STATUS_OCCLUDED) {
                 LogLine(L"Present fallo: %s", HrText(hr).c_str());
@@ -1534,28 +2100,38 @@ private:
                            startButton_, statusText_};
         for (HWND control : controls) ShowWindow(control, show ? SW_SHOW : SW_HIDE);
         if (show) {
-            SetWindowTextW(window_, L"Dayaah Capture 1.1.3");
+            SetWindowTextW(window_, L"Dayaah Capture 1.3.0");
             InvalidateRect(window_, nullptr, TRUE);
         } else {
-            SetWindowTextW(window_, L"Dayaah Capture 1.1.3 - iniciando...");
+            SetWindowTextW(window_, L"Dayaah Capture 1.3.0 - iniciando...");
         }
     }
 
     void UpdateFpsTitle() {
         if (!running_.load()) return;
-        ULONGLONG now = renderedFrames_.load();
-        ULONGLONG fps = now - lastFpsFrames_;
-        lastFpsFrames_ = now;
+        const ULONGLONG receivedNow = receivedFrames_.load();
+        const ULONGLONG presentedNow = renderedFrames_.load();
+        const ULONGLONG received = receivedNow - lastReceivedFpsFrames_;
+        const ULONGLONG presented = presentedNow - lastPresentedFpsFrames_;
+        lastReceivedFpsFrames_ = receivedNow;
+        lastPresentedFpsFrames_ = presentedNow;
+        receivedFps_.store(received);
+        presentedFps_.store(presented);
         wchar_t title[240]{};
         _snwprintf_s(title, _countof(title), _TRUNCATE,
-                     L"Dayaah Capture 1.1.3  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s",
-                     fps, activeMode_.width, activeMode_.height, activeMode_.Fps(),
+                     L"Dayaah Capture 1.3.0  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s",
+                     presented, activeMode_.width, activeMode_.height, activeMode_.Fps(),
                      GuidFormatName(activeMode_.subtype).c_str(),
-                     audio_.IsMuted() ? L"MUTE" : L"ON");
+                     audio_.IsMuted() ? L"MUTE" : L"ON",
+                     activeDiscoMode_.load() ? L"  -  DISCO RGB" : L"");
         SetWindowTextW(window_, title);
     }
 
     void UpdateCursorVisibility() {
+        if (menuOpen_) {
+            SetCaptureCursorHidden(false);
+            return;
+        }
         RecordRealCursorMovement();
 
         POINT cursor{};
@@ -1587,7 +2163,7 @@ private:
     }
 
     void SetCaptureCursorHidden(bool hidden) {
-        cursorHidden_ = hidden;
+        cursorHidden_ = hidden && !menuOpen_;
 
         if (!window_) return;
         POINT cursor{};
@@ -1596,13 +2172,13 @@ private:
             !GetClientRect(window_, &client) || !PtInRect(&client, cursor)) {
             return;
         }
-        const bool hideNow = hidden && running_.load() &&
+        const bool hideNow = cursorHidden_ && running_.load() &&
                              GetForegroundWindow() == window_;
         SetCursor(hideNow ? hiddenCursor_ : visibleCursor_);
     }
 
     void ToggleFullscreen() {
-        if (!running_.load()) return;
+        if (!running_.load() && !fullscreen_) return;
         if (!fullscreen_) {
             SetCaptureCursorHidden(false);
             windowStyle_ = GetWindowLongPtrW(window_, GWL_STYLE);
@@ -1663,6 +2239,9 @@ private:
         WritePrivateProfileStringW(L"capture", L"ultra_low_latency",
                                    LowLatencySelected() ? L"1" : L"0",
                                    path.c_str());
+        WritePrivateProfileStringW(L"capture", L"input_full_range",
+                                   activeInputFullRange_.load() ? L"1" : L"0",
+                                   path.c_str());
     }
 
     HINSTANCE instance_ = nullptr;
@@ -1682,6 +2261,9 @@ private:
     IMMDeviceEnumerator* audioEnumerator_ = nullptr;
     std::vector<VideoDeviceInfo> videoDevices_;
     std::vector<AudioDeviceInfo> audioDevices_;
+    std::vector<std::pair<UINT32, UINT32>> menuResolutions_;
+    std::vector<double> menuFps_;
+    std::vector<GUID> menuFormats_;
     VideoMode activeMode_{};
     int activeDeviceIndex_ = -1;
     D3DVideoRenderer* renderer_ = nullptr;
@@ -1695,6 +2277,7 @@ private:
     CRITICAL_SECTION frameLock_{};
     std::vector<BYTE> latestFrame_;
     std::vector<BYTE> renderFrame_;
+    bool framePending_ = false;
     LONG sourceStride_ = 0;
     HANDLE frameReadyEvent_ = nullptr;
     HANDLE resizeEvent_ = nullptr;
@@ -1704,12 +2287,26 @@ private:
     std::atomic<UINT> pendingHeight_{0};
     std::atomic<ULONGLONG> receivedFrames_{0};
     std::atomic<ULONGLONG> renderedFrames_{0};
-    ULONGLONG lastFpsFrames_ = 0;
+    std::atomic<ULONGLONG> discardedFrames_{0};
+    std::atomic<ULONGLONG> receivedFps_{0};
+    std::atomic<ULONGLONG> presentedFps_{0};
+    std::atomic<ULONGLONG> lastFrameArrivalTick_{0};
+    std::atomic<bool> activeLowLatency_{true};
+    std::atomic<bool> activeInputFullRange_{false};
+    std::atomic<bool> activeDiscoMode_{false};
+    DiscoSecret discoSecret_;
+    ULONGLONG lastReceivedFpsFrames_ = 0;
+    ULONGLONG lastPresentedFpsFrames_ = 0;
+    std::shared_ptr<const OverlayConfig> overlayConfig_;
+    OverlayEditor overlayEditor_;
+    bool overlaySettingsDirty_ = false;
+    bool overlaySaveErrorShown_ = false;
     ULONGLONG lastMouseMove_ = 0;
     POINT lastCursorPosition_{};
     bool hasLastCursorPosition_ = false;
     bool cursorHidden_ = false;
     bool mouseTracking_ = false;
+    bool menuOpen_ = false;
     bool capturingUi_ = false;
     bool fullscreen_ = false;
     LONG_PTR windowStyle_ = 0;
@@ -1750,7 +2347,7 @@ STDMETHODIMP SourceReaderCallback::OnFlush(DWORD) {
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     std::wstring logPath = JoinPath(ModuleDirectory(), L"DayaahCapture.log");
     DeleteFileW(logPath.c_str());
-    LogLine(L"Dayaah Capture 1.1.3 cursor hotfix iniciando");
+    LogLine(L"Dayaah Capture 1.3.0 iniciando");
 
     DayaahApp app;
     HRESULT hr = app.Initialize(instance);

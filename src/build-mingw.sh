@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Argument: extracted MinGW root (contains usr/bin and usr/share/mingw-w64).
 dayaah_mingw_root="${1:?Usage: bash build-mingw.sh /absolute/path/to/toolchain-mingw}"
 dayaah_src_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 dayaah_bin="$dayaah_mingw_root/usr/bin"
@@ -15,4 +14,5 @@ cd "$dayaah_src_dir"
     main.cpp DayaahCapture.res -o ../DayaahCapture.exe \
     -lole32 -loleaut32 -luuid -ld3d11 -ldxgi -ldxguid \
     -lmf -lmfplat -lmfreadwrite -lmfuuid -lavrt -lpropsys -lshlwapi \
-    -ldwmapi -luxtheme -lcomctl32 -lgdi32 -luser32
+    -ldwmapi -luxtheme -lcomctl32 -lcomdlg32 -ld2d1 -ldwrite -lwindowscodecs \
+    -lgdi32 -luser32
