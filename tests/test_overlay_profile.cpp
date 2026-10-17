@@ -6,7 +6,7 @@
 int main() {
     OverlayConfig original{};
     original.enabled = false;
-    for (int type = 0; type < 4; ++type) {
+    for (int type = 0; type < 5; ++type) {
         OverlayItem item = MakeDefaultOverlayItem(static_cast<OverlayItemType>(type), type + 1);
         item.name = L"Reloj de Dayaah";
         item.text = L"México {\"texto\": \"hola\"}\nsegunda línea\t\\ruta 🚀";
@@ -21,6 +21,12 @@ int main() {
         item.visible = type != 3;
         item.x = 0.05f;
         item.y = 0.06f;
+        if (item.type == OverlayItemType::Crosshair) {
+            item.anchor = OverlayAnchor::Center;
+            item.alignment = OverlayAlignment::Center;
+            item.x = 0.0f;
+            item.y = 0.0f;
+        }
         original.items.push_back(item);
     }
     const std::string serialized = overlay_profile::Serialize(original);
@@ -31,10 +37,15 @@ int main() {
         std::wcerr << error << L'\n';
         return 1;
     }
-    assert(reloaded.items.size() == 4 && !reloaded.enabled);
-    assert(overlay_profile::Serialize(reloaded) == serialized);
+    assert(reloaded.items.size() == 5 && !reloaded.enabled);
+    if (overlay_profile::Serialize(reloaded) != serialized) {
+        std::cerr << "Serialized profile changed after parse:\n" << serialized
+                  << "\nReloaded:\n" << overlay_profile::Serialize(reloaded) << '\n';
+        return 1;
+    }
     assert(reloaded.items[0].text == original.items[0].text);
     assert(reloaded.items[2].imagePath == original.items[2].imagePath);
+    assert(reloaded.items[4].type == OverlayItemType::Crosshair);
 
     for (size_t bytes : {size_t(0), serialized.size() / 2, serialized.size() - 2}) {
         assert(!overlay_profile::Parse(serialized.substr(0, bytes), reloaded, error));

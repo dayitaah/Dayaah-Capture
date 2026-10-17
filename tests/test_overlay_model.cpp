@@ -37,5 +37,17 @@ int main() {
     assert(Near(item.height, 0.03f));
     assert(Near(item.opacity, 1.0f));
 
-    std::cout << "Overlay anchors, positioning and clamps: PASS\n";
+    OverlayItem crosshair = MakeDefaultOverlayItem(OverlayItemType::Crosshair, 2);
+    crosshair.x = 0.8f;
+    crosshair.y = 0.2f;
+    crosshair.anchor = OverlayAnchor::BottomRight;
+    ClampOverlayItem(crosshair);
+    assert(crosshair.anchor == OverlayAnchor::Center);
+    assert(Near(crosshair.x, 0.0f));
+    assert(Near(crosshair.y, 0.0f));
+    const OverlayRectF crosshairRect = ResolveOverlayRect(crosshair);
+    assert(Near((crosshairRect.left + crosshairRect.right) * 0.5f, 0.5f));
+    assert(Near((crosshairRect.top + crosshairRect.bottom) * 0.5f, 0.5f));
+
+    std::cout << "Overlay anchors, positioning, crosshair and clamps: PASS\n";
 }
