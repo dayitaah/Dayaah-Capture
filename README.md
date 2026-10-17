@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 1.3.0" src="https://img.shields.io/badge/version-1.3.0-53D7B2">
+  <img alt="Version 2.0.1" src="https://img.shields.io/badge/version-2.0.1-53D7B2">
   <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
   <img alt="Licencia MIT" src="https://img.shields.io/badge/license-MIT-53D7B2">
@@ -27,12 +27,13 @@ only the newest frame, and presents it through D3D11. Capture-card audio is
 played through WASAPI in the same process. No MPV, FFmpeg, installer, account,
 or background service is required.
 
-The current stable release is **v1.3.0**.
+The current stable release is **v2.0.1**.
 
 ## Features
 
 - Native capture through Windows Media Foundation.
-- Raw NV12 and YUY2 video with no recompression.
+- Raw NV12,YUY2,XRGB,P010 video with no recompression.
+- I420 video uses CPU into NV12
 - D3D11 Video Processor color conversion and scaling.
 - Dedicated render thread separated from the window interface.
 - Latest-frame-only queue to prevent latency from accumulating.
@@ -66,7 +67,7 @@ Minimum latency (tearing may occur)
 ## Compatibility
 
 Dayaah Capture is not locked to one capture-card brand. It lists video devices
-exposed by Windows Media Foundation when they provide raw `NV12` or `YUY2`
+exposed by Windows Media Foundation when they provide raw NV12, YUY2, XRGB, I420 and P010
 output.
 
 Devices that expose only MJPEG, H.264, or another compressed format will not be
@@ -76,19 +77,20 @@ keeps latency predictable.
 The capture card's audio must appear as a separate recording device in Windows.
 Audio is sent to the current default playback device.
 
-Only one application can use some capture devices at a time. Close OBS, camera
-applications, browser capture pages, or other viewers if Dayaah Capture cannot
-open the card.
+Only one application can use some capture devices at a time.
 
 ## Controls
 
 | Control | Action |
 | --- | --- |
 | Right-click | Open the context menu |
-| `F11` or double-click | Enter or leave fullscreen |
-| `Esc` | Leave fullscreen or restore a maximized window |
-| `M` | Mute or restore audio |
-| `F10` | Show or hide all overlays |
+| `F6` | Toggle video effects |
+| `F7` | Open video-effect settings |
+| `F8` | Toggle approximate latency |
+| `F10` | Toggle overlays |
+| `F11` or double-click | Toggle fullscreen |
+| `Esc` | Leave fullscreen or restore the window |
+| `M` | Toggle audio mute |
 | Move the mouse | Show the cursor; it hides after one second of real inactivity |
 
 
@@ -105,6 +107,18 @@ and reloads at startup. Keep that file when updating and retain PNGs at their
 original paths. Opacity and size update while typing; closing the editor returns
 focus to capture without changing its window state.
 
+## Video formats
+
+| Format | Path | Note |
+| --- | --- | --- |
+| NV12 | Direct GPU | Recommended for low bandwidth |
+| YUY2 | Direct GPU | Uses more bandwidth than NV12 |
+| XRGB | Direct GPU | 4 bytes per pixel; potentially high penalty |
+| I420 | CPU conversion to NV12 | May increase CPU load |
+| P010 | 10-bit GPU | Limited compatibility; does not enable HDR by itself |
+
+Only modes advertised by the capture device are shown. If a live change is
+rejected, the application attempts to restore the previous mode.
 
 ## Presentation modes
 
@@ -113,17 +127,28 @@ focus to capture without changing its window state.
 | Minimum latency | Presents immediately; a tearing line may appear |
 | VSync | Removes tearing; may add up to one display refresh interval |
 
-## What is included in 1.3.0
+## What is included in new versions
 
-- Right-click context menu while capture is running.
-- Live gain, mute, and VSync controls.
-- Live limited (16-235) or full (0-255) input-range selection.
-- Hidden THPS4-inspired RGB disco easter egg during capture.
-- Separate overlay editor with text, 12/24-hour clock, transparent PNGs,
-  internal statistics, drag/resize, styling, anchors, and JSON profiles.
-- Resolution, FPS, or raw-format switching with a controlled capture restart
-  and automatic rollback when the device rejects the requested mode.
+## 2.0.1 fix
 
+- **Settings** now performs a clean process restart into setup, removing the
+  final video frame and completely closing the previous audio path.
+
+## New in 2.0.0
+
+- Setup video modes are split into resolution, FPS and format selectors.
+- NV12, YUY2, XRGB, I420 and P010 raw formats with performance/compatibility notices.
+- Full English and Spanish interface selector.
+- Machine-local first run: after one successful capture, later launches go
+  directly to the viewer. Copying the ZIP and INI to another PC shows setup again.
+- Ko-fi and GitHub links at the bottom of setup.
+- Stronger adaptive sharpening with a visibly useful range and local halo limiting.
+- Approximate latency HUD on `F8`.
+- Centered crosshair in the overlay editor.
+- A **Settings** context-menu command to return to setup.
+
+The device fingerprint is stored only as a local hash in `DayaahCapture.ini`.
+It is not transmitted, tied to an account, or used as DRM.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release notes.
 
@@ -133,7 +158,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the complete release notes.
 UVC capture card
   -> Media Foundation Source Reader (asynchronous, low latency)
   -> newest-frame buffer
-  -> NV12/YUY2 D3D11 texture
+  -> NV12/YUY2/XRGB/I420/P010 D3D11 texture
   -> D3D11 Video Processor
   -> flip-model swap chain
 
@@ -177,9 +202,8 @@ on every run.
 ## Current constraints
 
 - Windows x64 only.
-- Raw NV12/YUY2 input only.
-- Audio uses the Windows default playback device.
 - +15 and +18 dB may clip an already loud input signal.
+- Not tested HDR Compatibility or VRR
 
 ## Privacy
 
