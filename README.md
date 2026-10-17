@@ -1,3 +1,4 @@
+<p align="right"><a href="README.es.md">Español</a> · <strong>English</strong></p>
 <p align="center">
   <img src="assets/dayaah-capture-icon.png" width="180" alt="Dayaah Capture">
 </p>
