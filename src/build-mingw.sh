@@ -9,10 +9,10 @@ cd "$dayaah_src_dir"
 "$dayaah_bin/x86_64-w64-mingw32-g++-posix" \
     -B"$dayaah_bin/x86_64-w64-mingw32-" \
     -idirafter "$dayaah_mingw_root/usr/share/mingw-w64/include" \
-    -std=c++17 -O2 -Wall -Wextra -Werror -Wno-unused-parameter \
+    -std=c++17 -O2 -Wall -Wextra -Werror -Wno-unused-parameter -fno-use-linker-plugin \
     -municode -mwindows -static -static-libgcc -static-libstdc++ \
     main.cpp DayaahCapture.res -o ../DayaahCapture.exe \
     -lole32 -loleaut32 -luuid -ld3d11 -ldxgi -ldxguid \
-    -lmf -lmfplat -lmfreadwrite -lmfuuid -lavrt -lpropsys -lshlwapi \
+    -lmf -lmfplat -lmfreadwrite -lmfuuid -lavrt -lpropsys -lshlwapi -lshell32 -ladvapi32 \
     -ldwmapi -luxtheme -lcomctl32 -lcomdlg32 -ld2d1 -ldwrite -lwindowscodecs \
     -lgdi32 -luser32

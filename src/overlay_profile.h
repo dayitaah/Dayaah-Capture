@@ -85,6 +85,7 @@ inline const char* TypeName(OverlayItemType value) {
     case OverlayItemType::Clock: return "clock";
     case OverlayItemType::Image: return "image";
     case OverlayItemType::Stats: return "stats";
+    case OverlayItemType::Crosshair: return "crosshair";
     default: return "text";
     }
 }
@@ -323,6 +324,7 @@ inline bool Parse(const std::string& json, OverlayConfig& config, std::wstring& 
         if (type == L"clock") item.type = OverlayItemType::Clock;
         else if (type == L"image") item.type = OverlayItemType::Image;
         else if (type == L"stats") item.type = OverlayItemType::Stats;
+        else if (type == L"crosshair") item.type = OverlayItemType::Crosshair;
         else item.type = OverlayItemType::Text;
         if (anchor == L"top-right") item.anchor = OverlayAnchor::TopRight;
         else if (anchor == L"bottom-left") item.anchor = OverlayAnchor::BottomLeft;

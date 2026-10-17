@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-enum class OverlayItemType { Text, Clock, Image, Stats };
+enum class OverlayItemType { Text, Clock, Image, Stats, Crosshair };
 enum class OverlayAnchor { TopLeft, TopRight, BottomLeft, BottomRight, Center };
 enum class OverlayAlignment { Left, Center, Right };
 
@@ -56,6 +56,8 @@ struct OverlayStats {
     double sourceFps = 0.0;
     std::wstring format;
     bool lowLatency = true;
+    std::uint32_t approximateLatencyMs = 0;
+    bool english = false;
 };
 
 struct OverlayRectF {
@@ -67,6 +69,13 @@ struct OverlayRectF {
 
 inline OverlayRectF ResolveOverlayRect(const OverlayItem& item) {
     OverlayRectF result{};
+    if (item.type == OverlayItemType::Crosshair) {
+        result.left = 0.5f - item.width * 0.5f;
+        result.top = 0.5f - item.height * 0.5f;
+        result.right = result.left + item.width;
+        result.bottom = result.top + item.height;
+        return result;
+    }
     if (item.anchor == OverlayAnchor::TopLeft) {
         result.left = item.x;
         result.top = item.y;
@@ -89,6 +98,7 @@ inline OverlayRectF ResolveOverlayRect(const OverlayItem& item) {
 }
 
 inline void SetOverlayTopLeft(OverlayItem& item, float left, float top) {
+    if (item.type == OverlayItemType::Crosshair) return;
     if (item.anchor == OverlayAnchor::TopLeft) {
         item.x = left;
         item.y = top;
@@ -113,6 +123,14 @@ inline void ClampOverlayItem(OverlayItem& item) {
     item.opacity = std::clamp(item.opacity, 0.0f, 1.0f);
     item.fontSize = std::clamp(item.fontSize, 8.0f, 240.0f);
 
+    if (item.type == OverlayItemType::Crosshair) {
+        item.anchor = OverlayAnchor::Center;
+        item.alignment = OverlayAlignment::Center;
+        item.x = 0.0f;
+        item.y = 0.0f;
+        return;
+    }
+
     OverlayRectF rect = ResolveOverlayRect(item);
     float left = std::clamp(rect.left, 0.0f, 1.0f - item.width);
     float top = std::clamp(rect.top, 0.0f, 1.0f - item.height);
@@ -135,11 +153,20 @@ inline OverlayItem MakeDefaultOverlayItem(OverlayItemType type, std::uint64_t id
         item.name = L"Imagen PNG";
         item.width = 0.20f;
         item.height = 0.20f;
-    } else {
+    } else if (type == OverlayItemType::Stats) {
         item.name = L"Estadísticas";
         item.width = 0.34f;
         item.height = 0.25f;
         item.fontSize = 25.0f;
+    } else {
+        item.name = L"Mira";
+        item.width = 0.08f;
+        item.height = 0.14f;
+        item.fontSize = 32.0f;
+        item.anchor = OverlayAnchor::Center;
+        item.alignment = OverlayAlignment::Center;
+        item.x = 0.0f;
+        item.y = 0.0f;
     }
     return item;
 }

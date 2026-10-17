@@ -15,6 +15,7 @@
 
 #include "overlay_model.h"
 #include "overlay_profile.h"
+#include "localization.h"
 
 class OverlayEditor {
 public:
@@ -24,9 +25,10 @@ public:
     ~OverlayEditor() { Close(); }
 
     void Open(HINSTANCE instance, HWND owner, const std::shared_ptr<const OverlayConfig>& current,
-              ChangeCallback callback, CloseCallback closed = {}) {
+              AppLanguage language, ChangeCallback callback, CloseCallback closed = {}) {
         callback_ = std::move(callback);
         closed_ = std::move(closed);
+        language_ = language;
         if (current) config_ = *current;
         if (window_) {
             SetEnabled(config_.enabled);
@@ -47,7 +49,8 @@ public:
         klass.lpszClassName = L"DayaahOverlayEditorWindow";
         RegisterClassExW(&klass);
         window_ = CreateWindowExW(WS_EX_TOOLWINDOW, klass.lpszClassName,
-                                  L"Editor de overlays - Dayaah Capture",
+                                  Tr(language_, L"Editor de overlays - Dayaah Capture",
+                                     L"Overlay editor - Dayaah Capture"),
                                   (WS_OVERLAPPEDWINDOW & ~WS_MINIMIZEBOX) | WS_CLIPCHILDREN,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 1120, 730,
                                   owner_, nullptr, instance_, this);
@@ -98,7 +101,7 @@ public:
 private:
     enum : int {
         ID_LIST = 4100, ID_ENABLED, ID_ADD_TEXT, ID_ADD_CLOCK, ID_ADD_IMAGE,
-        ID_ADD_STATS, ID_DELETE, ID_SAVE, ID_LOAD, ID_VISIBLE, ID_CONTENT,
+        ID_ADD_STATS, ID_ADD_CROSSHAIR, ID_DELETE, ID_SAVE, ID_LOAD, ID_VISIBLE, ID_CONTENT,
         ID_FONT, ID_FONT_BUTTON, ID_SIZE, ID_OPACITY, ID_COLOR, ID_ANCHOR,
         ID_ALIGNMENT, ID_CLOCK24
     };
@@ -186,38 +189,41 @@ private:
         SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0);
         font_ = CreateFontIndirectW(&metrics.lfMessageFont);
 
-        enabled_ = Control(L"BUTTON", L"Mostrar overlays (F10)", BS_AUTOCHECKBOX, ID_ENABLED);
+        enabled_ = Control(L"BUTTON", Tr(language_, L"Mostrar overlays (F10)", L"Show overlays (F10)"), BS_AUTOCHECKBOX, ID_ENABLED);
         list_ = Control(L"LISTBOX", L"", LBS_NOTIFY | WS_BORDER | WS_VSCROLL, ID_LIST);
-        addText_ = Control(L"BUTTON", L"+ Texto", BS_PUSHBUTTON, ID_ADD_TEXT);
-        addClock_ = Control(L"BUTTON", L"+ Reloj", BS_PUSHBUTTON, ID_ADD_CLOCK);
+        addText_ = Control(L"BUTTON", Tr(language_, L"+ Texto", L"+ Text"), BS_PUSHBUTTON, ID_ADD_TEXT);
+        addClock_ = Control(L"BUTTON", Tr(language_, L"+ Reloj", L"+ Clock"), BS_PUSHBUTTON, ID_ADD_CLOCK);
         addImage_ = Control(L"BUTTON", L"+ PNG", BS_PUSHBUTTON, ID_ADD_IMAGE);
-        addStats_ = Control(L"BUTTON", L"+ Estadísticas", BS_PUSHBUTTON, ID_ADD_STATS);
-        delete_ = Control(L"BUTTON", L"Eliminar", BS_PUSHBUTTON, ID_DELETE);
-        save_ = Control(L"BUTTON", L"Guardar perfil...", BS_PUSHBUTTON, ID_SAVE);
-        load_ = Control(L"BUTTON", L"Cargar perfil...", BS_PUSHBUTTON, ID_LOAD);
+        addStats_ = Control(L"BUTTON", Tr(language_, L"+ Estadísticas", L"+ Statistics"), BS_PUSHBUTTON, ID_ADD_STATS);
+        addCrosshair_ = Control(L"BUTTON", Tr(language_, L"+ Mira", L"+ Crosshair"), BS_PUSHBUTTON, ID_ADD_CROSSHAIR);
+        delete_ = Control(L"BUTTON", Tr(language_, L"Eliminar", L"Delete"), BS_PUSHBUTTON, ID_DELETE);
+        save_ = Control(L"BUTTON", Tr(language_, L"Guardar perfil...", L"Save profile..."), BS_PUSHBUTTON, ID_SAVE);
+        load_ = Control(L"BUTTON", Tr(language_, L"Cargar perfil...", L"Load profile..."), BS_PUSHBUTTON, ID_LOAD);
 
-        propertyTitle_ = Control(L"STATIC", L"PROPIEDADES", SS_LEFT, 0);
-        visible_ = Control(L"BUTTON", L"Visible", BS_AUTOCHECKBOX, ID_VISIBLE);
-        contentLabel_ = Control(L"STATIC", L"Texto", SS_LEFT, 0);
+        propertyTitle_ = Control(L"STATIC", Tr(language_, L"PROPIEDADES", L"PROPERTIES"), SS_LEFT, 0);
+        visible_ = Control(L"BUTTON", Tr(language_, L"Visible", L"Visible"), BS_AUTOCHECKBOX, ID_VISIBLE);
+        contentLabel_ = Control(L"STATIC", Tr(language_, L"Texto", L"Text"), SS_LEFT, 0);
         content_ = Control(L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL, ID_CONTENT);
-        fontLabel_ = Control(L"STATIC", L"Fuente", SS_LEFT, 0);
+        fontLabel_ = Control(L"STATIC", Tr(language_, L"Fuente", L"Font"), SS_LEFT, 0);
         fontEdit_ = Control(L"EDIT", L"Segoe UI", WS_BORDER | ES_AUTOHSCROLL, ID_FONT);
-        fontButton_ = Control(L"BUTTON", L"Elegir...", BS_PUSHBUTTON, ID_FONT_BUTTON);
-        sizeLabel_ = Control(L"STATIC", L"Tamaño (px a 1080p)", SS_LEFT, 0);
+        fontButton_ = Control(L"BUTTON", Tr(language_, L"Elegir...", L"Choose..."), BS_PUSHBUTTON, ID_FONT_BUTTON);
+        sizeLabel_ = Control(L"STATIC", Tr(language_, L"Tamaño (px a 1080p)", L"Size (px at 1080p)"), SS_LEFT, 0);
         sizeEdit_ = Control(L"EDIT", L"36", WS_BORDER | ES_NUMBER, ID_SIZE);
-        opacityLabel_ = Control(L"STATIC", L"Opacidad (0-100)", SS_LEFT, 0);
+        opacityLabel_ = Control(L"STATIC", Tr(language_, L"Opacidad (0-100)", L"Opacity (0-100)"), SS_LEFT, 0);
         opacityEdit_ = Control(L"EDIT", L"100", WS_BORDER | ES_NUMBER, ID_OPACITY);
-        colorButton_ = Control(L"BUTTON", L"Color...", BS_PUSHBUTTON, ID_COLOR);
-        anchorLabel_ = Control(L"STATIC", L"Anclaje", SS_LEFT, 0);
+        colorButton_ = Control(L"BUTTON", Tr(language_, L"Color...", L"Color..."), BS_PUSHBUTTON, ID_COLOR);
+        anchorLabel_ = Control(L"STATIC", Tr(language_, L"Anclaje", L"Anchor"), SS_LEFT, 0);
         anchorCombo_ = Control(L"COMBOBOX", L"", CBS_DROPDOWNLIST, ID_ANCHOR);
-        alignLabel_ = Control(L"STATIC", L"Alineación", SS_LEFT, 0);
+        alignLabel_ = Control(L"STATIC", Tr(language_, L"Alineación", L"Alignment"), SS_LEFT, 0);
         alignCombo_ = Control(L"COMBOBOX", L"", CBS_DROPDOWNLIST, ID_ALIGNMENT);
-        clock24_ = Control(L"BUTTON", L"Reloj de 24 horas", BS_AUTOCHECKBOX, ID_CLOCK24);
-        const wchar_t* anchors[] = {L"Superior izquierda", L"Superior derecha",
-                                    L"Inferior izquierda", L"Inferior derecha", L"Centro"};
-        for (const wchar_t* value : anchors) ComboBox_AddString(anchorCombo_, value);
-        const wchar_t* alignments[] = {L"Izquierda", L"Centro", L"Derecha"};
-        for (const wchar_t* value : alignments) ComboBox_AddString(alignCombo_, value);
+        clock24_ = Control(L"BUTTON", Tr(language_, L"Reloj de 24 horas", L"24-hour clock"), BS_AUTOCHECKBOX, ID_CLOCK24);
+        const wchar_t* anchorsEs[] = {L"Superior izquierda", L"Superior derecha",
+                                      L"Inferior izquierda", L"Inferior derecha", L"Centro"};
+        const wchar_t* anchorsEn[] = {L"Top left", L"Top right", L"Bottom left", L"Bottom right", L"Center"};
+        for (int i = 0; i < 5; ++i) ComboBox_AddString(anchorCombo_, language_ == AppLanguage::English ? anchorsEn[i] : anchorsEs[i]);
+        const wchar_t* alignmentsEs[] = {L"Izquierda", L"Centro", L"Derecha"};
+        const wchar_t* alignmentsEn[] = {L"Left", L"Center", L"Right"};
+        for (int i = 0; i < 3; ++i) ComboBox_AddString(alignCombo_, language_ == AppLanguage::English ? alignmentsEn[i] : alignmentsEs[i]);
         Button_SetCheck(enabled_, config_.enabled ? BST_CHECKED : BST_UNCHECKED);
     }
 
@@ -242,15 +248,16 @@ private:
         viewer_ = {viewerX, viewerY, viewerX + viewerWidth, viewerY + viewerHeight};
 
         MoveWindow(enabled_, margin, 14, leftWidth, 26, TRUE);
-        MoveWindow(list_, margin, 50, leftWidth, std::max(140, height - 250), TRUE);
-        int y = std::max(200, height - 190);
+        MoveWindow(list_, margin, 50, leftWidth, std::max(120, height - 284), TRUE);
+        int y = std::max(170, height - 224);
         MoveWindow(addText_, margin, y, 105, 28, TRUE);
         MoveWindow(addClock_, margin + 115, y, 105, 28, TRUE);
         MoveWindow(addImage_, margin, y + 34, 105, 28, TRUE);
         MoveWindow(addStats_, margin + 115, y + 34, 105, 28, TRUE);
-        MoveWindow(delete_, margin, y + 68, leftWidth, 28, TRUE);
-        MoveWindow(save_, margin, y + 105, leftWidth, 28, TRUE);
-        MoveWindow(load_, margin, y + 139, leftWidth, 28, TRUE);
+        MoveWindow(addCrosshair_, margin, y + 68, leftWidth, 28, TRUE);
+        MoveWindow(delete_, margin, y + 102, leftWidth, 28, TRUE);
+        MoveWindow(save_, margin, y + 139, leftWidth, 28, TRUE);
+        MoveWindow(load_, margin, y + 173, leftWidth, 28, TRUE);
 
         const int x = width - rightWidth - margin;
         int py = 16;
@@ -302,6 +309,7 @@ private:
                          colorButton_, anchorCombo_, alignCombo_, clock24_};
         for (HWND field : fields) EnableWindow(field, available);
         if (item) {
+            const bool crosshair = item->type == OverlayItemType::Crosshair;
             Button_SetCheck(visible_, item->visible ? BST_CHECKED : BST_UNCHECKED);
             SetWindowTextW(content_, item->text.c_str());
             SetWindowTextW(fontEdit_, item->fontFamily.c_str());
@@ -313,6 +321,16 @@ private:
             ShowWindow(clock24_, item->type == OverlayItemType::Clock ? SW_SHOW : SW_HIDE);
             ShowWindow(content_, item->type == OverlayItemType::Text ? SW_SHOW : SW_HIDE);
             ShowWindow(contentLabel_, item->type == OverlayItemType::Text ? SW_SHOW : SW_HIDE);
+            ShowWindow(fontLabel_, crosshair ? SW_HIDE : SW_SHOW);
+            ShowWindow(fontEdit_, crosshair ? SW_HIDE : SW_SHOW);
+            ShowWindow(fontButton_, crosshair ? SW_HIDE : SW_SHOW);
+            ShowWindow(anchorLabel_, crosshair ? SW_HIDE : SW_SHOW);
+            ShowWindow(anchorCombo_, crosshair ? SW_HIDE : SW_SHOW);
+            ShowWindow(alignLabel_, crosshair ? SW_HIDE : SW_SHOW);
+            ShowWindow(alignCombo_, crosshair ? SW_HIDE : SW_SHOW);
+            SetWindowTextW(sizeLabel_, crosshair
+                ? Tr(language_, L"Tamaño de la mira (px)", L"Crosshair size (px)")
+                : Tr(language_, L"Tamaño (px a 1080p)", L"Size (px at 1080p)"));
         }
         syncing_ = false;
     }
@@ -333,6 +351,7 @@ private:
         if (id == ID_ADD_TEXT) Add(OverlayItemType::Text);
         else if (id == ID_ADD_CLOCK) Add(OverlayItemType::Clock);
         else if (id == ID_ADD_STATS) Add(OverlayItemType::Stats);
+        else if (id == ID_ADD_CROSSHAIR) Add(OverlayItemType::Crosshair);
         else if (id == ID_ADD_IMAGE) AddImage();
         else if (id == ID_DELETE) DeleteSelected();
         else if (id == ID_SAVE) SaveProfile();
@@ -357,7 +376,15 @@ private:
     }
 
     void Add(OverlayItemType type) {
-        config_.items.push_back(MakeDefaultOverlayItem(type, NextId()));
+        OverlayItem item = MakeDefaultOverlayItem(type, NextId());
+        if (language_ == AppLanguage::English) {
+            if (type == OverlayItemType::Text) item.name = L"Text";
+            else if (type == OverlayItemType::Clock) item.name = L"Clock";
+            else if (type == OverlayItemType::Image) item.name = L"PNG image";
+            else if (type == OverlayItemType::Stats) item.name = L"Statistics";
+            else item.name = L"Crosshair";
+        }
+        config_.items.push_back(std::move(item));
         selected_ = static_cast<int>(config_.items.size()) - 1;
         RefreshList();
         Publish();
@@ -368,7 +395,9 @@ private:
         OPENFILENAMEW dialog{};
         dialog.lStructSize = sizeof(dialog);
         dialog.hwndOwner = window_;
-        dialog.lpstrFilter = L"Imágenes PNG (*.png)\0*.png\0Todos los archivos\0*.*\0";
+        dialog.lpstrFilter = language_ == AppLanguage::English
+            ? L"PNG images (*.png)\0*.png\0All files\0*.*\0"
+            : L"Imágenes PNG (*.png)\0*.png\0Todos los archivos\0*.*\0";
         dialog.lpstrFile = path;
         dialog.nMaxFile = _countof(path);
         dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
@@ -379,7 +408,7 @@ private:
         std::wstring error;
         item.imagePixels = DecodePng(path, error);
         if (!item.imagePixels) {
-            MessageBoxW(window_, error.c_str(), L"Cargar PNG", MB_ICONERROR);
+            MessageBoxW(window_, error.c_str(), Tr(language_, L"Cargar PNG", L"Load PNG"), MB_ICONERROR);
             return;
         }
         config_.items.push_back(std::move(item));
@@ -461,7 +490,9 @@ private:
         OPENFILENAMEW dialog{};
         dialog.lStructSize = sizeof(dialog);
         dialog.hwndOwner = window_;
-        dialog.lpstrFilter = L"Perfil JSON (*.json)\0*.json\0";
+        dialog.lpstrFilter = language_ == AppLanguage::English
+            ? L"JSON profile (*.json)\0*.json\0"
+            : L"Perfil JSON (*.json)\0*.json\0";
         dialog.lpstrFile = path;
         dialog.nMaxFile = _countof(path);
         dialog.lpstrDefExt = L"json";
@@ -469,7 +500,7 @@ private:
         if (!GetSaveFileNameW(&dialog)) return;
         std::wstring error;
         if (!overlay_profile::Save(path, config_, error)) {
-            MessageBoxW(window_, error.c_str(), L"Guardar perfil", MB_ICONERROR);
+            MessageBoxW(window_, error.c_str(), Tr(language_, L"Guardar perfil", L"Save profile"), MB_ICONERROR);
         }
     }
 
@@ -478,20 +509,24 @@ private:
         OPENFILENAMEW dialog{};
         dialog.lStructSize = sizeof(dialog);
         dialog.hwndOwner = window_;
-        dialog.lpstrFilter = L"Perfil JSON (*.json)\0*.json\0Todos los archivos\0*.*\0";
+        dialog.lpstrFilter = language_ == AppLanguage::English
+            ? L"JSON profile (*.json)\0*.json\0All files\0*.*\0"
+            : L"Perfil JSON (*.json)\0*.json\0Todos los archivos\0*.*\0";
         dialog.lpstrFile = path;
         dialog.nMaxFile = _countof(path);
         dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
         if (!GetOpenFileNameW(&dialog)) return;
         std::wstring error;
         if (!overlay_profile::Load(path, config_, error)) {
-            MessageBoxW(window_, error.c_str(), L"Cargar perfil", MB_ICONERROR);
+            MessageBoxW(window_, error.c_str(), Tr(language_, L"Cargar perfil", L"Load profile"), MB_ICONERROR);
             return;
         }
         const std::wstring imageWarnings = PrepareProfileImages(config_, path);
         if (!imageWarnings.empty()) {
-            MessageBoxW(window_, (L"El perfil se cargó, pero no pude abrir estas imágenes:" +
-                        imageWarnings).c_str(), L"Cargar perfil", MB_ICONWARNING);
+            const std::wstring warning = Tr(language_,
+                L"El perfil se cargó, pero no pude abrir estas imágenes:",
+                L"The profile loaded, but these images could not be opened:") + imageWarnings;
+            MessageBoxW(window_, warning.c_str(), Tr(language_, L"Cargar perfil", L"Load profile"), MB_ICONWARNING);
         }
         Button_SetCheck(enabled_, config_.enabled ? BST_CHECKED : BST_UNCHECKED);
         selected_ = config_.items.empty() ? -1 : 0;
@@ -520,6 +555,10 @@ private:
             LoadProperties();
             dragRect_ = rect;
             dragStart_ = point;
+            if (config_.items[static_cast<size_t>(index)].type == OverlayItemType::Crosshair) {
+                InvalidateRect(window_, &viewer_, TRUE);
+                return;
+            }
             resizing_ = x >= rect.right - 14 && y >= rect.bottom - 14;
             dragging_ = true;
             SetCapture(window_);
@@ -532,6 +571,7 @@ private:
         if (!dragging_) return;
         OverlayItem* item = Selected();
         if (!item) return;
+        if (item->type == OverlayItemType::Crosshair) return;
         const float width = static_cast<float>(viewer_.right - viewer_.left);
         const float height = static_cast<float>(viewer_.bottom - viewer_.top);
         const float dx = (x - dragStart_.x) / width;
@@ -558,7 +598,9 @@ private:
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(145, 150, 160));
         RECT hint{viewer_.left + 12, viewer_.top + 10, viewer_.right - 12, viewer_.top + 34};
-        DrawTextW(dc, L"VISOR  ·  arrastra para mover  ·  esquina inferior derecha para redimensionar",
+        DrawTextW(dc, Tr(language_,
+                         L"VISOR  ·  arrastra para mover  ·  esquina inferior derecha para redimensionar",
+                         L"VIEWER  ·  drag to move  ·  resize from the bottom-right corner"),
                   -1, &hint, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         for (size_t index = 0; index < config_.items.size(); ++index) {
             const OverlayItem& item = config_.items[index];
@@ -578,10 +620,29 @@ private:
             SelectObject(dc, oldPen);
             DeleteObject(pen);
             SetTextColor(dc, color);
+            if (item.type == OverlayItemType::Crosshair) {
+                const int centerX = (rect.left + rect.right) / 2;
+                const int centerY = (rect.top + rect.bottom) / 2;
+                const int size = std::max(8, static_cast<int>(item.fontSize *
+                    (viewer_.bottom - viewer_.top) / 1080.0f));
+                const int gap = std::max(2, size / 5);
+                const int arm = std::max(4, size / 2);
+                HPEN crosshairPen = CreatePen(PS_SOLID, std::max(1, size / 14), color);
+                HGDIOBJ previous = SelectObject(dc, crosshairPen);
+                MoveToEx(dc, centerX - gap - arm, centerY, nullptr); LineTo(dc, centerX - gap, centerY);
+                MoveToEx(dc, centerX + gap, centerY, nullptr); LineTo(dc, centerX + gap + arm, centerY);
+                MoveToEx(dc, centerX, centerY - gap - arm, nullptr); LineTo(dc, centerX, centerY - gap);
+                MoveToEx(dc, centerX, centerY + gap, nullptr); LineTo(dc, centerX, centerY + gap + arm);
+                SelectObject(dc, previous);
+                DeleteObject(crosshairPen);
+                continue;
+            }
             std::wstring label = item.text;
             if (item.type == OverlayItemType::Clock) label = item.clock24h ? L"23:59:59" : L"11:59:59 PM";
             else if (item.type == OverlayItemType::Image) label = L"PNG · " + item.name;
-            else if (item.type == OverlayItemType::Stats) label = L"Entrada: 60 fps | Presentado: 60 fps\nFrames descartados: 0\n1920x1080 NV12 · 1 ms";
+            else if (item.type == OverlayItemType::Stats) label = Tr(language_,
+                L"Entrada: 60 fps | Presentado: 60 fps\nFrames descartados: 0\n1920x1080 NV12 · 1 ms",
+                L"Input: 60 fps | Presented: 60 fps\nDropped frames: 0\n1920x1080 NV12 · 1 ms");
             RECT textRect = rect;
             InflateRect(&textRect, -5, -4);
             UINT flags = DT_WORDBREAK | DT_TOP | DT_END_ELLIPSIS;
@@ -676,6 +737,7 @@ private:
     HWND addClock_ = nullptr;
     HWND addImage_ = nullptr;
     HWND addStats_ = nullptr;
+    HWND addCrosshair_ = nullptr;
     HWND delete_ = nullptr;
     HWND save_ = nullptr;
     HWND load_ = nullptr;
@@ -707,4 +769,5 @@ private:
     bool closing_ = false;
     bool dragging_ = false;
     bool resizing_ = false;
+    AppLanguage language_ = AppLanguage::Spanish;
 };
