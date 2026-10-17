@@ -1,5 +1,27 @@
 # Registro de cambios de Dayaah Capture
 
+## 2.0.1 
+
+- Corregido **Configuración**: ahora reinicia el proceso en modo configuración
+  para cerrar definitivamente captura, audio, render e imagen residual.
+
+## 2.0.0 
+
+- Rediseñado el modo de video en selectores de resolución, FPS y formato.
+- Añadidos XRGB, I420 y P010 a NV12/YUY2, con avisos de coste y compatibilidad.
+- Añadida interfaz seleccionable en español e inglés.
+- Añadidos enlaces a GitHub y Ko-fi en configuración.
+- Añadido flujo de primera ejecución mediante hash local de equipo y arranque
+  directo al visor después de una captura correcta.
+- Reforzada la nitidez adaptativa para producir un resultado perceptible.
+- Añadido HUD `F8` de latencia aproximada sensible a FPS, edad del cuadro y VSync.
+- Añadida mira central al editor de overlays.
+- Añadido acceso a Configuración desde el menú contextual.
+
+## 1.4.0-beta1 
+
+Nitidez adaptativa original, controles SDR y CRT ligero. F6 compara con el original; F7 abre el panel. Guardado INI y retorno a la ruta directa ante fallo de efectos. Los overlays se dibujan después.
+
 ## Versión 1.3.0 — Visor de capturadoras HDMI
 
 - Modo disco RGB inspirado en THPS4.
