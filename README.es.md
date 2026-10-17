@@ -96,9 +96,17 @@ Algunas capturadoras solo permiten que una aplicación las use a la vez.
 | `Esc` | Salir de pantalla completa o restaurar la ventana |
 | `M` | Silenciar o activar el audio |
 | Mover el mouse | Mostrar el cursor; se oculta después de un segundo de inactividad real |
-El efecto RGB oculto muestra su estado activo en el título de la ventana e informa cuando la GPU no es compatible con el filtro de tono requerido. Escribe DISCO para activarlo mientras el visor está en ejecución.
-Abre el editor desde el menú contextual. Su lienzo es un visor para organizar capas. Las estadísticas internas abarcan los FPS recibidos y presentados, los fotogramas descartados, la resolución/formato, el modo de sincronización y la antigüedad del último fotograma.
-El diseño se guarda automáticamente en DayaahCapture.overlays.json junto al archivo EXE y se vuelve a cargar al iniciar. Conserva ese archivo al actualizar y mantén los archivos PNG en sus rutas originales. La opacidad y el tamaño se actualizan mientras escribes; al cerrar el editor, el foco regresa a la captura sin cambiar el estado de su ventana.
+
+El efecto RGB oculto muestra su estado activo en el título de la ventana e informa cuando la GPU no es compatible 
+con el filtro de tono requerido.
+
+Escribe DISCO para activarlo mientras el visor está en ejecución.
+Abre el editor desde el menú contextual. Su lienzo es un visor para organizar capas.
+Las estadísticas internas abarcan los FPS recibidos y presentados, los fotogramas descartados, la resolución/formato, el modo de sincronización 
+y la antigüedad del último fotograma.
+El diseño se guarda automáticamente en DayaahCapture.overlays.json junto al archivo EXE y se vuelve a cargar al iniciar.
+Conserva ese archivo al actualizar y mantén los archivos PNG en sus rutas originales.
+La opacidad y el tamaño se actualizan mientras escribes; al cerrar el editor, el foco regresa a la captura sin cambiar el estado de su ventana.
 
 
 ## Formatos de video
@@ -139,7 +147,9 @@ El diseño se guarda automáticamente en DayaahCapture.overlays.json junto al ar
 - HUD de latencia aproximada con `F8`.
 - Mira centrada disponible en el editor de overlays.
 - Opción **Configuración** en el menú contextual para volver a la pantalla inicial.
+
 La huella del dispositivo se guarda de forma local en `DayaahCapture.ini`. No se envia, no se usa para ninguna cuenta ni se usa como DRM.
+
 Consulta [CHANGELOG-ES.md](CHANGELOG-ES.md) para ver las notas completas del
 lanzamiento.
 
