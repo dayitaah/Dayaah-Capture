@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Versión 1.3.0" src="https://img.shields.io/badge/versión-1.3.0-53D7B2">
+  <img alt="Versión 2.0.1" src="https://img.shields.io/badge/versión-2.0.1-53D7B2">
   <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
   <img alt="Licencia MIT" src="https://img.shields.io/badge/licencia-MIT-53D7B2">
@@ -30,12 +30,13 @@ D3D11. El audio de la capturadora se reproduce por WASAPI dentro del mismo
 proceso. No necesita MPV, FFmpeg, instalador, cuentas ni servicios en segundo
 plano.
 
-La versión estable actual es la **v1.3.0**.
+La versión estable actual es la **v2.0.1**.
 
 ## Características
 
 - Captura nativa mediante Windows Media Foundation.
-- Video crudo NV12 y YUY2, sin recompresión.
+- Video crudo NV12, YUY2, XRGB, y P010, sin recompresión.
+- I420 usa CPU hacia NV12
 - Conversión de color y escalado con D3D11 Video Processor.
 - Hilo de render dedicado y separado de la interfaz de la ventana.
 - Cola limitada al cuadro más reciente para impedir que se acumule latencia.
@@ -70,7 +71,7 @@ Latencia mínima (puede haber tearing)
 
 Dayaah Capture no está limitado a una marca de capturadora. Muestra los
 dispositivos de video expuestos por Windows Media Foundation cuando ofrecen
-salida cruda `NV12` o `YUY2`.
+salida cruda NV12, YUY2, XRGB, I420 y P010.
 
 Los dispositivos que solo entreguen MJPEG, H.264 u otro formato comprimido no
 aparecerán. Mantener una ruta de video crudo evita etapas ocultas de
@@ -80,18 +81,31 @@ El audio de la capturadora debe aparecer como un dispositivo de grabación
 independiente en Windows. La salida utiliza el dispositivo de reproducción
 predeterminado actual.
 
-Algunas capturadoras solo permiten que una aplicación las use a la vez. Cierra
-OBS, aplicaciones de cámara, páginas de captura del navegador u otros visores
-si Dayaah Capture no puede abrir el dispositivo.
+Algunas capturadoras solo permiten que una aplicación las use a la vez.
 
 ## Controles
 
 | Control | Acción |
 | --- | --- |
-| `F11` o doble clic | Entrar o salir de pantalla completa |
-| `Esc` | Salir de pantalla completa o restaurar una ventana maximizada |
-| `M` | Silenciar o reactivar el audio |
+| Clic derecho | Abrir el menú contextual |
+| `F6` | Activar o desactivar efectos |
+| `F7` | Abrir los ajustes de efectos |
+| `F8` | Mostrar u ocultar la latencia aproximada |
+| `F10` | Mostrar u ocultar overlays |
+| `F11` o doble clic | Pantalla completa |
+| `Esc` | Salir de pantalla completa o restaurar la ventana |
+| `M` | Silenciar o activar el audio |
 | Mover el mouse | Mostrar el cursor; se oculta después de un segundo de inactividad real |
+
+## Formatos de video
+
+| Formato | Ruta | Nota |
+| --- | --- | --- |
+| NV12 | GPU directa | Recomendado por su bajo ancho de banda |
+| YUY2 | GPU directa | Usa más ancho de banda que NV12 |
+| XRGB | GPU directa | 4 bytes por píxel; penalización alta posible |
+| I420 | Conversión CPU a NV12 | Puede elevar el uso de CPU |
+| P010 | GPU, 10 bits | Compatibilidad limitada; no activa HDR por sí solo |
 
 ## Modos de presentación
 
@@ -100,18 +114,28 @@ si Dayaah Capture no puede abrir el dispositivo.
 | Latencia mínima | Presenta inmediatamente; puede aparecer una línea de tearing |
 | VSync | Elimina el tearing; puede añadir hasta un intervalo de refresco |
 
-## Novedades en la versión 1.3.0
+## Novedades en las nuevas versiones
 
-- Menú contextual durante la captura mediante clic derecho.
-- Ganancia, silencio y VSync ajustables en vivo.
-- Selección en vivo del rango de entrada limitado (16-235) o completo (0-255).
-- Easter egg RGB inspirado en el modo disco de THPS4, activable durante la captura
-  al escribir DISCO.
-- Editor separado de overlays con texto, reloj de 12/24 horas, PNG transparente,
-  estadísticas internas, arrastre, redimensionado, estilos, anclajes y perfiles JSON.
-- Cambio de resolución, FPS o formato crudo con reinicio controlado de la
-  captura y restauración automática si el dispositivo rechaza el modo.
+## Corrección 2.0.1
 
+- **Configuración** reinicia limpiamente el proceso en ese modo, eliminando el
+  último fotograma y cerrando por completo el audio anterior.
+
+## Novedades de la 2.0.0
+
+- Pantalla de configuración reorganizada en resolución, FPS y formato.
+- Formatos crudos NV12, YUY2, XRGB, I420 y P010 con avisos de rendimiento y compatibilidad.
+- Selector de interfaz en español o inglés.
+- Primera ejecución vinculada a una huella local del equipo: tras iniciar una
+  captura correctamente, las siguientes aperturas entran al visor. Si se copia
+  el ZIP y su INI a otro equipo, vuelve a mostrarse la configuración.
+- Enlaces a Ko-fi y GitHub al pie de configuración.
+- Nitidez adaptativa reforzada para que el cambio sea visible, manteniendo un
+  límite local que reduce halos.
+- HUD de latencia aproximada con `F8`.
+- Mira centrada disponible en el editor de overlays.
+- Opción **Configuración** en el menú contextual para volver a la pantalla inicial.
+- 
 Consulta [CHANGELOG-ES.md](CHANGELOG-ES.md) para ver las notas completas del
 lanzamiento.
 
@@ -121,7 +145,7 @@ lanzamiento.
 Capturadora UVC
   -> Media Foundation Source Reader (asíncrono, baja latencia)
   -> búfer del cuadro más reciente
-  -> textura D3D11 NV12/YUY2
+  -> textura D3D11 NV12/YUY2/XRGB/I420/P010
   -> D3D11 Video Processor
   -> swap chain de modelo flip
 
@@ -165,9 +189,9 @@ uno nuevo en cada ejecución.
 ## Restricciones actuales
 
 - Solo Windows x64.
-- Solo entrada cruda NV12/YUY2.
 - El audio utiliza el dispositivo de reproducción predeterminado de Windows.
 - +15 y +18 dB pueden saturar una señal que ya venga fuerte.
+- No se ha comprobado compatibilidad HDR o VRR
 
 ## Privacidad
 
