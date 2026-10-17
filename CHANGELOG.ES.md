@@ -1,5 +1,7 @@
 # Registro de cambios de Dayaah Capture
 
+**Español** | [English](CHANGELOG.md)
+
 ## 2.0.1 
 
 - Corregido **Configuración**: ahora reinicia el proceso en modo configuración
