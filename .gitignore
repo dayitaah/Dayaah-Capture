@@ -4,3 +4,7 @@ src/*.obj
 src/*.res
 *.pdb
 *.ilk
+build/
+
+# Local test binaries
+tests/out/

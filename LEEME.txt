@@ -1,89 +1,33 @@
-DAYAAH CAPTURE 1.3.0 — VISOR DE CAPTURADORAS HDMI
-================================================
+Dayaah Capture 2.0.1 - Windows x64
 
-Visor nativo de capturadoras HDMI para Windows 10/11 x64.
-No requiere MPV, FFmpeg ni instalación.
-
-NOVEDADES DE LA VERSIÓN 1.3.0
-----------------------
-- Clic derecho durante la captura para abrir el menú contextual.
-- Ganancia, silencio y VSync ajustables en vivo.
-- Rango de entrada limitado (16-235) o completo (0-255) ajustable en vivo.
-- Easter egg RGB inspirado en el modo disco de THPS4, activable durante la captura.
-- Editor separado de overlays: texto, reloj 12/24 h, PNG transparente y
-  estadísticas internas. Permite arrastrar, redimensionar, elegir fuente,
-  color, opacidad, alineación y anclaje, y guardar/cargar perfiles JSON.
-- Cambio de resolución, FPS o formato crudo con reinicio controlado y
-  restauración automática si la capturadora rechaza el nuevo modo.
-
-PRIMERA PRUEBA
---------------
-1. Extrae toda la carpeta en un lugar normal, por ejemplo Documentos.
+1. Extrae el ZIP completo en una carpeta nueva.
 2. Ejecuta DayaahCapture.exe.
-3. Selecciona la capturadora, un modo NV12 o YUY2 y la entrada de audio.
-4. Para la UGREEN 25173 se recomienda comenzar con:
-      1920 x 1080 - 60 fps - NV12
-      HDMI (UGREEN 25173)
-      +15 dB
-      Latencia mínima (puede haber tearing)
-5. Pulsa INICIAR CAPTURA.
+3. Elige idioma, capturadora, resolución, FPS, formato, audio y sincronización.
+4. Inicia la captura. Desde ese momento las próximas aperturas entrarán
+   directamente al visor en este equipo.
+5. Usa clic derecho > Configuración... para volver a la pantalla inicial.
 
-CONTROLES
----------
-Clic derecho      Menú contextual
-F11 o doble clic  Pantalla completa
-Esc               Salir de pantalla completa / restaurar maximizada
-M                 Silenciar / activar audio
-F10               Mostrar / ocultar overlays
+Atajos:
+F6  Efectos de video
+F7  Panel de nitidez, color y CRT
+F8  Latencia real aproximada
+F10 Overlays
+F11 Pantalla completa
+M   Silencio
 
-El modo disco RGB es un easter egg con el teclado durante la captura. Cuando está
-activo aparece en el título; si la GPU no admite el filtro de tono, se avisa.
-Activable escribiendo DISCO durante la captura
-El cursor se oculta tras un segundo sin movimiento dentro del video. Muévelo
-para recuperarlo inmediatamente. Fuera del video siempre debe permanecer visible.
+Formatos: NV12 y YUY2; XRGB de alto ancho de banda; I420 con conversión CPU;
+P010 de 10 bits y compatibilidad limitada. La aplicación solo muestra los
+modos anunciados por la capturadora y enseña su posible penalización.
 
-Los overlays se guardan automáticamente y se restauran al abrir la aplicación.
-La opacidad y el tamaño se aplican al escribir. La X del editor cierra solamente
-el editor y devuelve el foco a la captura. Los botones de guardar/cargar perfiles
-siguen disponibles para mantener varios diseños.
+La cifra de F8 es una estimación, no una medición con sensor. Considera FPS,
+edad del cuadro, presentación y VSync; no puede medir exactamente el panel
+conectado al PS5.
 
-DISEÑO DE BAJA LATENCIA
------------------------
-- Media Foundation con MF_LOW_LATENCY.
-- Video crudo NV12/YUY2; no usa MJPEG.
-- Conserva únicamente el cuadro más reciente.
-- D3D11 Video Processor para conversión y escalado.
-- Direct2D/DirectWrite sobre el mismo backbuffer para los overlays.
-- Hilo de render separado de la interfaz.
-- Profundidad de presentación mínima y tearing opcional.
-- Audio WASAPI en el mismo proceso, con ganancia 0/+6/+12/+15/+18 dB.
-- Si el audio acumula cola, descarta lo antiguo para volver al directo.
+La huella local de primera ejecución es un hash guardado en DayaahCapture.ini.
+No se envía a internet ni funciona como DRM. Al mover ZIP+INI a otro equipo,
+la configuración inicial vuelve a aparecer.
 
-ARCHIVOS QUE CREA
------------------
-DayaahCapture.ini  Recuerda la última configuración.
-DayaahCapture.log  Diagnóstico para reportar fallos.
-DayaahCapture.overlays.json  Último diseño de overlays (guardado automático).
-*.json             Perfiles de overlay donde decidas guardarlos.
+Reporta errores: https://github.com/dayitaah/Dayaah-Capture/issues
+Apoya a Dayaah: https://ko-fi.com/dayaah
 
-Conserva DayaahCapture.overlays.json junto al EXE al actualizar el programa.
-Los PNG se recuerdan por su ruta: conserva también las imágenes originales.
-
-REPORTAR UN ERROR
------------------
-Abre un Issue en:
-https://github.com/dayitaah/Dayaah-Capture/issues
-
-Adjunta DayaahCapture.log e indica capturadora, modo de video, Windows y los
-pasos exactos para reproducirlo. Haz una copia del log antes de volver a abrir
-el programa, porque se crea uno nuevo en cada ejecución.
-
-NOTAS
------
-- La conversión es SDR BT.709; el rango de entrada se elige desde el menú.
-- La salida de audio usa el dispositivo predeterminado de Windows.
-- +15/+18 dB pueden saturar si la entrada ya viene fuerte.
-- Si aparece tearing, elige "VSync (cola máxima: 1 cuadro)" antes de iniciar.
-- Puedes conservar tu DayaahCapture.ini anterior.
-
-Licencia MIT. Proyecto: https://github.com/dayitaah/Dayaah-Capture
+Licencia MIT. Código fuente en el paquete Source separado.
