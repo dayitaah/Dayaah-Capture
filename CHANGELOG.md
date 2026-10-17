@@ -2,6 +2,28 @@
 
 **English** | [Español](CHANGELOG.ES.md)
 
+## 2.0.1 
+
+- Fixed **Settings** by restarting into setup, fully terminating capture,
+  audio, rendering and the residual final frame.
+
+## 2.0.0 
+
+- Reworked video-mode setup into resolution, FPS and format selectors.
+- Added XRGB, I420 and P010 beside NV12/YUY2, including cost/compatibility notices.
+- Added selectable English and Spanish UI.
+- Added GitHub and Ko-fi links to setup.
+- Added machine-local first-run tracking and direct viewer startup after a
+  successful capture.
+- Strengthened adaptive sharpening for a visible result.
+- Added an `F8` approximate-latency HUD responsive to FPS, frame age and VSync.
+- Added a centered crosshair to the overlay editor.
+- Added a Settings command to the capture context menu.
+
+## 1.4.0-beta1 
+
+Adaptive sharpening, SDR color and lightweight CRT shaders; F6 bypass, F7 panel, persistent INI settings and direct-path fallback. Effects precede overlays.
+
 ## Version 1.3.0 — HDMI capture card viewer
 
 - THPS4-inspired RGB disco mode.
