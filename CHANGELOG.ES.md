@@ -2,7 +2,7 @@
 
 **Español** | [English](CHANGELOG.md)
 
-## 2.2.0 — 2026-11-07
+## 2.2.0 
 
 Esta es la única actualización acumulativa después de 2.0.1; no hay entradas
 2.1.x separadas que seguir.
