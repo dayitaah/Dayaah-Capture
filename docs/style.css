@@ -151,6 +151,26 @@ h1 { font-size: clamp(52px, 6.2vw, 86px); line-height: .96; letter-spacing: -.06
 .toggle-demo .on { background:rgba(93,240,207,.1); color:var(--mint); }
 .privacy-lock { position:absolute; left:26px; bottom:28px; border:1px solid rgba(93,240,207,.14); color:#6db5a6; border-radius:8px; padding:8px 10px; font-size:9px; font-weight:850; letter-spacing:.1em; }
 
+.release-section { scroll-margin-top:100px; }
+.release-wrap { padding:105px 0; }
+.release-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
+.release-grid article { min-height:230px; padding:25px; border:1px solid rgba(255,255,255,.065); border-radius:20px; background:linear-gradient(145deg,rgba(16,31,39,.82),rgba(7,15,20,.8)); position:relative; overflow:hidden; }
+.release-grid article::after { content:""; position:absolute; width:150px; height:150px; right:-80px; bottom:-85px; border-radius:50%; background:radial-gradient(circle,rgba(93,240,207,.09),transparent 70%); }
+.release-grid article > span { display:inline-flex; min-width:42px; height:30px; padding:0 10px; align-items:center; justify-content:center; border-radius:8px; color:var(--mint); background:rgba(93,240,207,.08); border:1px solid rgba(93,240,207,.14); font-size:9px; font-weight:900; letter-spacing:.1em; }
+.release-grid h3 { margin:22px 0 10px; font-size:19px; letter-spacing:-.025em; }
+.release-grid p { margin:0; color:#7f9894; font-size:13px; line-height:1.68; }
+
+.web-viewer-section { padding:112px 0; scroll-margin-top:90px; }
+.web-viewer-heading { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:44px; margin-bottom:34px; }
+.web-viewer-heading h2 { font-size:clamp(38px,5vw,60px); line-height:1.02; letter-spacing:-.052em; margin:12px 0 16px; max-width:780px; }
+.web-viewer-heading p { color:#8fa7a3; line-height:1.7; font-size:16px; max-width:760px; margin:0; }
+.web-viewer-notes { display:flex; flex-direction:column; gap:10px; color:#7fa79f; font-size:11px; letter-spacing:.04em; white-space:nowrap; }
+.viewer-embed-shell { padding:10px; border-radius:28px; border:1px solid rgba(93,240,207,.18); background:linear-gradient(145deg,rgba(93,240,207,.07),rgba(255,255,255,.02)); box-shadow:var(--shadow); }
+.viewer-embed-shell iframe { display:block; width:100%; height:min(720px,78vh); min-height:590px; border:0; border-radius:19px; background:#050c11; }
+.viewer-links { display:flex; align-items:center; justify-content:space-between; gap:30px; margin-top:22px; }
+.viewer-links .button { flex:0 0 auto; }
+.viewer-links p { margin:0; max-width:680px; color:#617b77; font-size:12px; line-height:1.65; text-align:right; }
+
 .dark-band { border-top:1px solid rgba(255,255,255,.055); border-bottom:1px solid rgba(255,255,255,.055); background:linear-gradient(180deg, rgba(3,8,11,.2), rgba(1,5,7,.48)); }
 .pipeline-wrap { padding:105px 0; }
 .pipeline { margin-top:42px; display:grid; grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr; align-items:center; gap:12px; }
@@ -207,6 +227,11 @@ h1 { font-size: clamp(52px, 6.2vw, 86px); line-height: .96; letter-spacing: -.06
   .hero-lead { margin-left:auto; margin-right:auto; }
   .hero-visual { width:min(760px,100%); margin:auto; }
   .feature-grid { grid-template-columns:repeat(2,1fr); }
+  .release-grid { grid-template-columns:repeat(2,1fr); }
+  .web-viewer-heading { grid-template-columns:1fr; gap:22px; }
+  .web-viewer-notes { flex-direction:row; flex-wrap:wrap; }
+  .viewer-links { align-items:flex-start; flex-direction:column; }
+  .viewer-links p { text-align:left; }
   .pipeline { grid-template-columns:1fr; }
   .arrow { transform:rotate(90deg); text-align:center; }
   .pipe-node { min-height:110px; }
@@ -235,6 +260,12 @@ h1 { font-size: clamp(52px, 6.2vw, 86px); line-height: .96; letter-spacing: -.06
   .ticker { gap:14px; }
   .content-section, .pipeline-wrap { padding:80px 0; }
   .feature-grid { grid-template-columns:1fr; }
+  .release-wrap, .web-viewer-section { padding:80px 0; }
+  .release-grid { grid-template-columns:1fr; }
+  .release-grid article { min-height:205px; }
+  .web-viewer-notes { display:grid; }
+  .viewer-embed-shell { padding:5px; border-radius:20px; }
+  .viewer-embed-shell iframe { min-height:680px; height:82vh; border-radius:15px; }
   .feature-card { min-height:285px; }
   .support-section { padding-bottom:80px; }
   .support-card { padding:30px 24px; }
@@ -246,3 +277,4 @@ h1 { font-size: clamp(52px, 6.2vw, 86px); line-height: .96; letter-spacing: -.06
   html { scroll-behavior:auto; }
   *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; }
 }
+

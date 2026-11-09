@@ -24,39 +24,45 @@ async function updateLatestRelease() {
 
 const i18n = {
   en: {
-    nav_features:'Features', nav_how:'How it works', nav_requirements:'Requirements', download:'Download',
+    nav_features:'Features', nav_new:'New in 2.2.0', nav_web:'Web Viewer', nav_requirements:'Requirements', download:'Download',
     eyebrow:'Native Windows capture viewer', hero_a:'Your capture card.', hero_b:'Without the latency hell.',
     hero_lead:'Dayaah Capture keeps only the newest frame and presents it through D3D11, built for people who want to actually play through a capture card.',
     download_latest:'Download latest', view_github:'View on GitHub', portable:'Portable', no_telemetry:'No telemetry', device:'VIDEO DEVICE', mode:'MODE', audio:'AUDIO', minimum_latency:'Minimum latency', frame_queue:'newest-frame queue', background_services:'background services',
     built_for_speed:'BUILT FOR SPEED', features_title:'Less pipeline. Less waiting.', features_lead:'Dayaah Capture skips the stuff you do not need when the goal is simple: get HDMI video onto your screen as quickly as possible.',
     f1_title:'Newest frame wins', f1_text:'A single-frame strategy avoids building a long video queue behind what is happening on the console right now.',
-    f2_title:'Raw video modes', f2_text:'Direct NV12 and YUY2 capture through Windows Media Foundation, with no hidden MJPEG or H.264 recompression stage.',
+    f2_title:'Raw video modes', f2_text:'Direct NV12, YUY2, XRGB, I420 and P010 capture through Windows Media Foundation, with clear compatibility and performance notices.',
     f3_title:'D3D11 presentation', f3_text:'Hardware video processing, scaling and a flip-discard swap chain keep the display path lean.',
     f4_title:'Audio in the same app', f4_text:'WASAPI monitoring with selectable gain from 0 to +18 dB. No separate player process required.',
     f5_title:'Tearing or VSync. Your call.', f5_text:'Use minimum-latency presentation for speed, or optional VSync when a clean image matters more than one refresh interval.',
     f6_title:'Tiny, local and boring—in a good way', f6_text:'No installer, account, ads, telemetry, analytics or network connection required to use the app.',
+    new_title:'A smarter, tougher capture path.', new_lead:'The newest release keeps latency under control, recovers from capture failures and adds tools for understanding exactly what every frame is doing.',
+    new_pip:'A movable, resizable and always-on-top viewer that pauses effects while preserving overlays and audio.', new_auto:'Scores the real modes exposed by your device and validates the winner with a live stability test.', new_governor:'Replaces stale pending frames before GPU work begins, preventing latency from piling up.', new_phoenix:'Rebuilds the capture path after stalls, reader errors or live format changes, then returns safely to Settings if needed.', new_vrr_title:'Minimum latency', new_vrr:'Uses tearing-capable presentation when Windows allows it, ready for compatible VRR displays.', new_scope:'Shows intervals, jitter, queue depth, GPU time, presentation time and a live 120-frame graph.',
+    web_title:'Try your capture card in the browser.', web_lead:'A local, install-free viewer for quick tests. Your video stays on this device and permission is requested only after you press Start.', web_local:'✓ Local processing', web_private:'✓ No telemetry', web_https:'✓ Secure browser access', web_open:'Open Web Viewer in a new tab', web_disclaimer:'The web viewer depends on browser capture APIs and cannot guarantee the same format control or latency as the native Windows app.',
     pipeline_kicker:'THE PIPELINE', pipeline_title:'From HDMI to pixels, without the scenic route.', pipe1:'Capture card', pipe3:'Newest frame', pipe5:'Your display', asap:'ASAP',
     requirements_kicker:'COMPATIBILITY', requirements_title:'What you need.', requirements_intro:'Dayaah Capture is intentionally picky about video formats because predictable latency is the whole point.',
-    req1:'Native desktop application.', req2:'Your capture card must expose one of these modes through Media Foundation.', audio_input:'Windows audio input', req3:'Required only if you want audio monitoring.',
+    req1:'Native desktop application.', raw_mode:'Compatible raw video mode', req2:'NV12 and YUY2 are preferred; XRGB, I420 and P010 are also supported with device-dependent costs.', audio_input:'Windows audio input', req3:'Required only if you want audio monitoring.',
     quick_start:'QUICK START', step1:'Download and extract the ZIP.', step2:'Run DayaahCapture.exe.', step3:'Choose your video device, mode and audio input.', step4:'Hit Start and play.', controls_link:'See keyboard controls',
     support_title:'Useful? Buy Dayaah a coffee ☕', support_text:'Dayaah Capture is free and open source. If it saved you from capture latency hell, you can support development on Ko-fi.', report_bug:'Report a bug',
     final_title:'Less latency. More game.', final_text:'Portable. Open source. Built for Windows.', download_dayaah:'Download Dayaah Capture', footer_tagline:'Native ultra-low-latency HDMI capture viewer for Windows.'
   },
   es: {
-    nav_features:'Funciones', nav_how:'Cómo funciona', nav_requirements:'Requisitos', download:'Descargar',
+    nav_features:'Funciones', nav_new:'Nuevo en 2.2.0', nav_web:'Visor web', nav_requirements:'Requisitos', download:'Descargar',
     eyebrow:'Visor nativo para Windows', hero_a:'Tu capturadora.', hero_b:'Sin el infierno de latencia.',
     hero_lead:'Dayaah Capture conserva únicamente el cuadro más reciente y lo presenta mediante D3D11, pensado para quienes quieren jugar de verdad a través de una capturadora.',
     download_latest:'Descargar última versión', view_github:'Ver en GitHub', portable:'Portable', no_telemetry:'Sin telemetría', device:'DISPOSITIVO DE VIDEO', mode:'MODO', audio:'AUDIO', minimum_latency:'Latencia mínima', frame_queue:'cuadro más reciente', background_services:'servicios en segundo plano',
     built_for_speed:'HECHO PARA LA VELOCIDAD', features_title:'Menos recorrido. Menos espera.', features_lead:'Dayaah Capture se salta lo que no necesitas cuando el objetivo es simple: llevar el HDMI a tu pantalla lo más rápido posible.',
     f1_title:'El cuadro más nuevo gana', f1_text:'Una estrategia de un solo cuadro evita acumular una larga cola de video detrás de lo que está ocurriendo ahora mismo en la consola.',
-    f2_title:'Modos de video crudo', f2_text:'Captura directa NV12 y YUY2 mediante Windows Media Foundation, sin una etapa oculta de recompresión MJPEG o H.264.',
+    f2_title:'Modos de video crudo', f2_text:'Captura directa NV12, YUY2, XRGB, I420 y P010 mediante Windows Media Foundation, con avisos claros de compatibilidad y rendimiento.',
     f3_title:'Presentación con D3D11', f3_text:'Procesamiento de video por hardware, escalado y una swap chain flip-discard mantienen ligera la ruta de presentación.',
     f4_title:'Audio en la misma app', f4_text:'Monitoreo WASAPI con ganancia seleccionable de 0 a +18 dB. No hace falta otro reproductor por separado.',
     f5_title:'Tearing o VSync. Tú eliges.', f5_text:'Usa presentación de latencia mínima para máxima velocidad, o VSync opcional si prefieres una imagen limpia aunque cueste hasta un refresco.',
     f6_title:'Pequeño, local y aburrido—de la buena manera', f6_text:'Sin instalador, cuenta, anuncios, telemetría, analíticas ni conexión de red necesaria para usar la app.',
+    new_title:'Una ruta de captura más inteligente y resistente.', new_lead:'La versión más reciente mantiene la latencia bajo control, se recupera de fallos y añade herramientas para entender exactamente qué ocurre con cada frame.',
+    new_pip:'Un visor movible, redimensionable y siempre visible que pausa los efectos sin quitar overlays ni audio.', new_auto:'Puntúa los modos reales de tu dispositivo y valida al ganador con una prueba de estabilidad en vivo.', new_governor:'Reemplaza frames pendientes atrasados antes de entrar a la GPU, evitando que la latencia se acumule.', new_phoenix:'Reconstruye la captura después de bloqueos, errores del reader o cambios de formato y vuelve de forma segura a Configuración si es necesario.', new_vrr_title:'Latencia mínima', new_vrr:'Usa presentación con tearing cuando Windows lo permite, lista para pantallas VRR compatibles.', new_scope:'Muestra intervalos, jitter, cola, tiempos de GPU y presentación, además de una gráfica en vivo de 120 frames.',
+    web_title:'Prueba tu capturadora desde el navegador.', web_lead:'Un visor local y sin instalación para pruebas rápidas. Tu video permanece en este dispositivo y sólo pide permiso después de pulsar Iniciar.', web_local:'✓ Procesamiento local', web_private:'✓ Sin telemetría', web_https:'✓ Acceso seguro del navegador', web_open:'Abrir el visor web en otra pestaña', web_disclaimer:'El visor web depende de las APIs del navegador y no puede garantizar el mismo control de formatos ni la misma latencia que la aplicación nativa de Windows.',
     pipeline_kicker:'LA RUTA', pipeline_title:'Del HDMI a tus píxeles, sin tomar el camino turístico.', pipe1:'Capturadora', pipe3:'Cuadro más reciente', pipe5:'Tu pantalla', asap:'YA',
     requirements_kicker:'COMPATIBILIDAD', requirements_title:'Lo que necesitas.', requirements_intro:'Dayaah Capture es exigente con los formatos de video a propósito: la latencia predecible es precisamente la meta.',
-    req1:'Aplicación nativa de escritorio.', req2:'Tu capturadora debe exponer uno de estos modos mediante Media Foundation.', audio_input:'Entrada de audio de Windows', req3:'Solo es necesaria si quieres monitorear el audio.',
+    req1:'Aplicación nativa de escritorio.', raw_mode:'Modo de video crudo compatible', req2:'Se prefieren NV12 y YUY2; XRGB, I420 y P010 también son compatibles con costos que dependen del dispositivo.', audio_input:'Entrada de audio de Windows', req3:'Solo es necesaria si quieres monitorear el audio.',
     quick_start:'INICIO RÁPIDO', step1:'Descarga y extrae el ZIP.', step2:'Ejecuta DayaahCapture.exe.', step3:'Elige el dispositivo de video, modo y entrada de audio.', step4:'Pulsa Start y a jugar.', controls_link:'Ver controles de teclado',
     support_title:'¿Te sirvió? Invítale un café a Dayaah ☕', support_text:'Dayaah Capture es gratuito y de código abierto. Si te salvó del infierno de latencia de las capturadoras, puedes apoyar el desarrollo en Ko-fi.', report_bug:'Reportar un bug',
     final_title:'Menos latencia. Más juego.', final_text:'Portable. Código abierto. Hecho para Windows.', download_dayaah:'Descargar Dayaah Capture', footer_tagline:'Visor HDMI nativo de latencia ultrabaja para Windows.'
@@ -80,3 +86,4 @@ function applyLanguage(lang) {
 langButton.addEventListener('click', () => applyLanguage(currentLang === 'en' ? 'es' : 'en'));
 applyLanguage(currentLang);
 updateLatestRelease();
+

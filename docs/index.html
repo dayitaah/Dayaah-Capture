@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#081016" />
-  <meta name="description" content="Dayaah Capture is a native ultra-low-latency HDMI capture viewer for Windows 10/11. Raw NV12/YUY2, D3D11 rendering and WASAPI audio." />
-  <meta name="keywords" content="Dayaah Capture, capture card, HDMI capture, low latency, Windows, NV12, YUY2, D3D11, WASAPI, PS5, Nintendo Switch, Xbox" />
+  <meta name="description" content="Dayaah Capture is a native ultra-low-latency HDMI capture viewer for Windows 10/11 with raw video modes, D3D11 rendering and WASAPI audio." />
+  <meta name="keywords" content="Dayaah Capture, capture card, HDMI capture, low latency, Windows, NV12, YUY2, XRGB, I420, P010, D3D11, WASAPI, PS5, Nintendo Switch, Xbox" />
   <meta name="author" content="Dayaah" />
   <meta name="google-site-verification" content="y7rUHLxKZN7Rbw1JIKP5yFhVS_oFIGhD_gyBJDUpxsQ" />
   <meta property="og:type" content="website" />
@@ -34,7 +34,8 @@
 
     <nav class="nav" aria-label="Main navigation">
       <a href="#features" data-i18n="nav_features">Features</a>
-      <a href="#how" data-i18n="nav_how">How it works</a>
+      <a href="#new" data-i18n="nav_new">New in 2.2.0</a>
+      <a href="#web-viewer" data-i18n="nav_web">Web Viewer</a>
       <a href="#requirements" data-i18n="nav_requirements">Requirements</a>
       <a href="https://github.com/dayitaah/Dayaah-Capture" target="_blank" rel="noreferrer">GitHub</a>
     </nav>
@@ -103,7 +104,7 @@
     </section>
 
     <section class="ticker" aria-label="Technology list">
-      <div>MEDIA FOUNDATION</div><i></i><div>RAW NV12 / YUY2</div><i></i><div>D3D11</div><i></i><div>WASAPI</div><i></i><div>WINDOWS x64</div>
+      <div>MEDIA FOUNDATION</div><i></i><div>NV12 · YUY2 · XRGB · I420 · P010</div><i></i><div>D3D11</div><i></i><div>WASAPI</div><i></i><div>WINDOWS x64</div>
     </section>
 
     <section class="section-shell content-section" id="features">
@@ -123,8 +124,8 @@
         <article class="feature-card">
           <div class="feature-icon">02</div>
           <h3 data-i18n="f2_title">Raw video modes</h3>
-          <p data-i18n="f2_text">Direct NV12 and YUY2 capture through Windows Media Foundation, with no hidden MJPEG or H.264 recompression stage.</p>
-          <div class="tag-row"><span>NV12</span><span>YUY2</span><span>RAW</span></div>
+          <p data-i18n="f2_text">Direct NV12, YUY2, XRGB, I420 and P010 capture through Windows Media Foundation, with clear compatibility and performance notices.</p>
+          <div class="tag-row"><span>NV12</span><span>YUY2</span><span>XRGB</span><span>I420</span><span>P010</span></div>
         </article>
         <article class="feature-card">
           <div class="feature-icon">03</div>
@@ -153,6 +154,46 @@
       </div>
     </section>
 
+    <section class="dark-band release-section" id="new">
+      <div class="section-shell release-wrap">
+        <div class="section-heading">
+          <span class="section-kicker">DAYAAH CAPTURE 2.2.0</span>
+          <h2 data-i18n="new_title">A smarter, tougher capture path.</h2>
+          <p data-i18n="new_lead">The newest release keeps latency under control, recovers from capture failures and adds tools for understanding exactly what every frame is doing.</p>
+        </div>
+        <div class="release-grid">
+          <article><span>F12</span><h3>Picture in Picture</h3><p data-i18n="new_pip">A movable, resizable and always-on-top viewer that pauses effects while preserving overlays and audio.</p></article>
+          <article><span>AUTO</span><h3>Dayaah AutoTune</h3><p data-i18n="new_auto">Scores the real modes exposed by your device and validates the winner with a live stability test.</p></article>
+          <article><span>NOW</span><h3>Latency Governor</h3><p data-i18n="new_governor">Replaces stale pending frames before GPU work begins, preventing latency from piling up.</p></article>
+          <article><span>×3</span><h3>Phoenix Recovery</h3><p data-i18n="new_phoenix">Rebuilds the capture path after stalls, reader errors or live format changes, then returns safely to Settings if needed.</p></article>
+          <article><span>VRR</span><h3 data-i18n="new_vrr_title">Minimum latency</h3><p data-i18n="new_vrr">Uses tearing-capable presentation when Windows allows it, ready for compatible VRR displays.</p></article>
+          <article><span>F9</span><h3>Frame Pacing Scope</h3><p data-i18n="new_scope">Shows intervals, jitter, queue depth, GPU time, presentation time and a live 120-frame graph.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section-shell web-viewer-section" id="web-viewer">
+      <div class="web-viewer-heading">
+        <div>
+          <span class="section-kicker">WEB VIEWER · BETA</span>
+          <h2 data-i18n="web_title">Try your capture card in the browser.</h2>
+          <p data-i18n="web_lead">A local, install-free viewer for quick tests. Your video stays on this device and permission is requested only after you press Start.</p>
+        </div>
+        <div class="web-viewer-notes">
+          <span data-i18n="web_local">✓ Local processing</span>
+          <span data-i18n="web_private">✓ No telemetry</span>
+          <span data-i18n="web_https">✓ Secure browser access</span>
+        </div>
+      </div>
+      <div class="viewer-embed-shell">
+        <iframe src="./viewer/" title="Dayaah Capture Web Viewer" loading="lazy" allow="camera; microphone; fullscreen; autoplay"></iframe>
+      </div>
+      <div class="viewer-links">
+        <a class="button secondary" href="./viewer/" target="_blank" rel="noreferrer"><span data-i18n="web_open">Open Web Viewer in a new tab</span> ↗</a>
+        <p data-i18n="web_disclaimer">The web viewer depends on browser capture APIs and cannot guarantee the same format control or latency as the native Windows app.</p>
+      </div>
+    </section>
+
     <section class="dark-band" id="how">
       <div class="section-shell pipeline-wrap">
         <div class="section-heading left">
@@ -162,7 +203,7 @@
         <div class="pipeline">
           <div class="pipe-node"><span>1</span><strong data-i18n="pipe1">Capture card</strong><small>UVC / HDMI</small></div>
           <div class="arrow">→</div>
-          <div class="pipe-node"><span>2</span><strong>Media Foundation</strong><small>NV12 / YUY2</small></div>
+          <div class="pipe-node"><span>2</span><strong>Media Foundation</strong><small>RAW VIDEO</small></div>
           <div class="arrow">→</div>
           <div class="pipe-node"><span>3</span><strong data-i18n="pipe3">Newest frame</strong><small>1-frame queue</small></div>
           <div class="arrow">→</div>
@@ -180,7 +221,7 @@
         <p data-i18n="requirements_intro">Dayaah Capture is intentionally picky about video formats because predictable latency is the whole point.</p>
         <ul class="check-list">
           <li><span>✓</span><div><strong>Windows 10 or 11 x64</strong><small data-i18n="req1">Native desktop application.</small></div></li>
-          <li><span>✓</span><div><strong>Raw NV12 / YUY2</strong><small data-i18n="req2">Your capture card must expose one of these modes through Media Foundation.</small></div></li>
+          <li><span>✓</span><div><strong data-i18n="raw_mode">Compatible raw video mode</strong><small data-i18n="req2">NV12 and YUY2 are preferred; XRGB, I420 and P010 are also supported with device-dependent costs.</small></div></li>
           <li><span>✓</span><div><strong data-i18n="audio_input">Windows audio input</strong><small data-i18n="req3">Required only if you want audio monitoring.</small></div></li>
         </ul>
       </div>
@@ -237,3 +278,4 @@
   <script src="./script.js"></script>
 </body>
 </html>
+
