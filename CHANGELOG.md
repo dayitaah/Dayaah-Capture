@@ -2,6 +2,49 @@
 
 **English** | [Español](CHANGELOG.ES.md)
 
+## 2.2.0 
+
+This is the single cumulative update after 2.0.1; there are no separate 2.1.x
+entries to follow.
+
+- Added Picture in Picture on `F12`: a borderless, always-on-top, movable and
+  resizable viewer with persistent geometry. It reuses the existing capture,
+  pauses video effects to save GPU work and restores them exactly on exit.
+- Overlays, crosshair, audio and telemetry HUDs remain available in PiP. `Esc`
+  leaves PiP first, and double-clicking PiP switches to fullscreen.
+- Renamed the fast path to **Minimum latency (No VSync - VRR)**. It negotiates
+  tearing support and uses `DXGI_PRESENT_ALLOW_TEARING` when Windows allows it.
+- Added Dayaah AutoTune with advertised-mode scoring and five-second live
+  validation using pacing, drops, GPU work and presentation measurements.
+- Made AutoTune, live mode changes and Phoenix tolerate capture drivers that
+  release their video pin a little late, with a short restart grace period,
+  bounded busy-device retries and exact startup-stage logging.
+- Added the latest-frame Latency Governor, pre-GPU stale-frame replacement and
+  discard telemetry.
+- Added the `F9` Frame Pacing Scope with intervals, jitter, queue depth, GPU and
+  presentation timing, plus a 120-frame graph.
+- Added smooth slide/fade notices and a 59.94/60 Hz VSync cadence warning.
+- Added Phoenix Recovery for stalls, reader errors and live format changes,
+  bounded to three attempts. A final failure returns to Settings through the
+  safe replacement-process path without residual audio or a frozen last frame.
+- Isolated every Source Reader callback with a capture-session ID. A callback
+  from an old session can no longer submit a frame, report an error, signal the
+  new flush event or start a second `ReadSample` chain on the new reader.
+- Closed the Source Reader lifetime race with a small lock, a local `AddRef`
+  around `ReadSample`, and ordered `Flush`, callback detach and COM release.
+- Replaced per-frame temporary vectors and duplicate pixel copies with reusable
+  producer buffers, row-aware `Lock2D`, a contiguous fallback and the existing
+  flat-lock compatibility path. I420 keeps only its required CPU interleave.
+- Normal launches rotate `DayaahCapture.log` to `.log.1`. Internal restarts
+  preserve the active log, append a separator and record the Phoenix reason.
+- Prevented the `M` mute hotkey from repeating while held.
+- Removed model-specific UGREEN and generic HDMI first-run defaults. Unsaved
+  setups now select the first video device and leave audio disabled.
+- Overlay profiles now validate schema 1, keep defaults for missing optional
+  fields and preserve an invalid original as `.bad` before overwriting it.
+- Bounded PNG decoding to 8192 pixels per side and 32 million total pixels,
+  handled allocation failure, and cleared resize-dependent text formats.
+
 ## 2.0.1 
 
 - Fixed **Settings** by restarting into setup, fully terminating capture,
