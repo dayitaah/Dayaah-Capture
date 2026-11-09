@@ -47,6 +47,20 @@ int main() {
     assert(reloaded.items[2].imagePath == original.items[2].imagePath);
     assert(reloaded.items[4].type == OverlayItemType::Crosshair);
 
+    OverlayConfig minimalReloaded{};
+    const std::string minimal =
+        "{\"schema\":1,\"items\":[{\"id\":77,\"type\":\"crosshair\"}]}";
+    assert(overlay_profile::Parse(minimal, minimalReloaded, error));
+    assert(minimalReloaded.enabled && minimalReloaded.items.size() == 1);
+    assert(minimalReloaded.items[0].type == OverlayItemType::Crosshair);
+    assert(minimalReloaded.items[0].anchor == OverlayAnchor::Center);
+
+    std::string unknownSchema = serialized;
+    const size_t schemaPosition = unknownSchema.find("\"schema\": 1");
+    assert(schemaPosition != std::string::npos);
+    unknownSchema.replace(schemaPosition, 11, "\"schema\": 2");
+    assert(!overlay_profile::Parse(unknownSchema, minimalReloaded, error));
+
     for (size_t bytes : {size_t(0), serialized.size() / 2, serialized.size() - 2}) {
         assert(!overlay_profile::Parse(serialized.substr(0, bytes), reloaded, error));
         assert(overlay_profile::Serialize(reloaded) == serialized);
