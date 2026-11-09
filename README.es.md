@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Versión 2.0.1" src="https://img.shields.io/badge/versión-2.0.1-53D7B2">
+  <img alt="Versión 2.2.0" src="https://img.shields.io/badge/versión-2.2.0-53D7B2">
   <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
   <img alt="Licencia MIT" src="https://img.shields.io/badge/licencia-MIT-53D7B2">
@@ -30,7 +30,7 @@ D3D11. El audio de la capturadora se reproduce por WASAPI dentro del mismo
 proceso. No necesita MPV, FFmpeg, instalador, cuentas ni servicios en segundo
 plano.
 
-La versión estable actual es la **v2.0.1**.
+La versión estable actual es la **v2.2.0**.
 PD: si quieren versiones beta con nuevas funciones que ando probando mandenme mensaje a discord @dayaah
 
 ## Características
@@ -48,6 +48,11 @@ PD: si quieren versiones beta con nuevas funciones que ando probando mandenme me
 - Detección automática de dispositivos, resoluciones, FPS y formatos.
 - Pantalla completa, silencio rápido y ocultamiento confiable del cursor.
 - Configuración local en un archivo INI que recuerda las últimas opciones.
+- Nuevo Dayaah Autotune para rapida configuración
+- Nuevo Latency Governor que descarta frames viejos para no mostrarlos
+- Nuevo Phoenix Recovery para capturadoras inestables
+- Nuevo osciloscopio de Frame-pacing con 120 frames de muestreo
+- Nuevo Imagen-en-Imagen que muestra la captura encima de todo y se puede cambiar tamaño
 
 ## Descargar y usar
 
@@ -92,9 +97,11 @@ Algunas capturadoras solo permiten que una aplicación las use a la vez.
 | `F6` | Activar o desactivar efectos |
 | `F7` | Abrir los ajustes de efectos |
 | `F8` | Mostrar u ocultar la latencia aproximada |
+| `F9` | Mostrar u ocultar el osciloscopio de frame pacing |
 | `F10` | Mostrar u ocultar overlays |
 | `F11` o doble clic | Pantalla completa |
-| `Esc` | Salir de pantalla completa o restaurar la ventana |
+| `F12` | Activar o salir de Picture in Picture |
+| `Esc` | Salir de PiP, salir de pantalla completa o restaurar la ventana |
 | `M` | Silenciar o activar el audio |
 | Mover el mouse | Mostrar el cursor; se oculta después de un segundo de inactividad real |
 
@@ -129,27 +136,20 @@ La opacidad y el tamaño se actualizan mientras escribes; al cerrar el editor, e
 
 ## Novedades en las nuevas versiones
 
-## Corrección 2.0.1
+## Novedades de la 2.2.0
 
-- **Configuración** reinicia limpiamente el proceso en ese modo, eliminando el
-  último fotograma y cerrando por completo el audio anterior.
+Esta es la única actualización acumulativa después de la versión 2.0.1.
 
-## Novedades de la 2.0.0
-
-- Pantalla de configuración reorganizada en resolución, FPS y formato.
-- Formatos crudos NV12, YUY2, XRGB, I420 y P010 con avisos de rendimiento y compatibilidad.
-- Selector de interfaz en español o inglés.
-- Primera ejecución vinculada a una huella local del equipo: tras iniciar una
-  captura correctamente, las siguientes aperturas entran al visor. Si se copia
-  el ZIP y su INI a otro equipo, vuelve a mostrarse la configuración.
-- Enlaces a Ko-fi y GitHub al pie de configuración.
-- Nitidez adaptativa reforzada para que el cambio sea visible, manteniendo un
-  límite local que reduce halos.
-- HUD de latencia aproximada con `F8`.
-- Mira centrada disponible en el editor de overlays.
-- Opción **Configuración** en el menú contextual para volver a la pantalla inicial.
-
-La huella del dispositivo se guarda de forma local en `DayaahCapture.ini`. No se envia, no se usa para ninguna cuenta ni se usa como DRM.
+- Añadido Picture in Picture con `F12`: visor sin bordes, siempre visible, movible y redimensionable, con tamaño y posición persistentes. Los efectos se pausan automáticamente, mientras que los overlays, la mira, el audio y la telemetría permanecen disponibles.
+- Renombrado el modo rápido a **Latencia mínima (No VSync - VRR)**, usando presentación con tearing cuando Windows lo permite.
+- Añadido Dayaah AutoTune con puntuación de modos, pruebas de estabilidad y reapertura segura para capturadoras cuyos drivers tardan en liberar el dispositivo.
+- Añadido Latency Governor, que reemplaza frames atrasados antes del procesamiento en la GPU para evitar la acumulación de latencia.
+- Añadido el Osciloscopio de Frame Pacing con `F9`, mostrando jitter, cola, tiempos de GPU y presentación, además de una gráfica de 120 frames.
+- Añadidas notificaciones suaves y una advertencia para diferencias de cadencia entre 59.94 y 60 Hz con VSync.
+- Añadido Phoenix Recovery para bloqueos, errores del reader y cambios de formato, con tres intentos de recuperación y regreso seguro a Configuración.
+- Mejorados el aislamiento de sesiones, los callbacks del Source Reader, el orden de apagado y la seguridad entre hilos.
+- Reducidas las copias de memoria y asignaciones por frame mediante buffers reutilizables y mejor manejo de `Lock2D`.
+- Mejorados la conservación del log, el comportamiento de la tecla de silencio, los dispositivos predeterminados, la recuperación de perfiles de overlays y los límites de seguridad para imágenes PNG.
 
 Consulta [CHANGELOG-ES.md](CHANGELOG-ES.md) para ver las notas completas del
 lanzamiento.
@@ -184,8 +184,7 @@ escritorio con C++** y un Windows SDK.
 3. Ejecuta `src\build-msvc.bat`.
 
 El ejecutable resultante se guarda en la raíz del proyecto como
-`DayaahCapture.exe`. También se incluye un script de compilación cruzada con
-MinGW para mantenimiento.
+`DayaahCapture.exe`
 
 ## Reportar errores
 
@@ -206,7 +205,7 @@ uno nuevo en cada ejecución.
 - Solo Windows x64.
 - El audio utiliza el dispositivo de reproducción predeterminado de Windows.
 - +15 y +18 dB pueden saturar una señal que ya venga fuerte.
-- No se ha comprobado compatibilidad HDR o VRR
+- No se ha comprobado compatibilidad HDR 
 
 ## Privacidad
 
