@@ -29,7 +29,7 @@ played through WASAPI in the same process. No MPV, FFmpeg, installer, account,
 or background service is required.
 
 The current stable release is **v2.0.1**.
-
+PD: If you want beta releases send me message on my discord @dayaah
 ## Features
 
 - Native capture through Windows Media Foundation.
