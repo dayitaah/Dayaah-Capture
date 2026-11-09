@@ -11,12 +11,15 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <new>
 #include <string>
 
 #include "overlay_model.h"
 #include "overlay_profile.h"
 #include "localization.h"
 
+// Editor Win32 independiente. Trabaja sobre una copia local y publica cambios
+// completos al viewer; asi arrastrar una capa no pausa ni bloquea la captura.
 class OverlayEditor {
 public:
     using ChangeCallback = std::function<void(const OverlayConfig&)>;
@@ -81,6 +84,8 @@ public:
     }
 
     static std::wstring PrepareProfileImages(OverlayConfig& config, const std::wstring& profilePath) {
+        // Las rutas relativas se interpretan desde la carpeta del perfil. Eso
+        // permite compartir una carpeta con JSON + PNG sin editar rutas a mano.
         wchar_t directory[MAX_PATH]{};
         lstrcpynW(directory, profilePath.c_str(), MAX_PATH);
         PathRemoveFileSpecW(directory);
@@ -228,6 +233,8 @@ private:
     }
 
     void Layout(int width, int height) {
+        // Tres columnas: capas, lienzo 16:9 y propiedades. El lienzo conserva
+        // proporcion aunque redimensiones el editor como acordeon.
         const int margin = 14;
         const int leftWidth = 220;
         const int rightWidth = 260;
@@ -426,6 +433,8 @@ private:
     }
 
     void ApplyProperties() {
+        // Cada tecla o slider actualiza la capa seleccionada, la sanea y la
+        // publica. Por eso los cambios se ven en vivo sin boton de Aplicar.
         if (syncing_ || closing_ || !window_) return;
         OverlayItem* item = Selected();
         if (!item) return;
@@ -545,6 +554,8 @@ private:
     }
 
     void BeginDrag(int x, int y) {
+        // Primero buscamos de arriba hacia abajo (orden visual inverso) para
+        // agarrar la capa que realmente se ve encima de las otras.
         POINT point{x, y};
         if (!PtInRect(&viewer_, point)) return;
         for (int index = static_cast<int>(config_.items.size()) - 1; index >= 0; --index) {
@@ -568,6 +579,8 @@ private:
     }
 
     void ContinueDrag(int x, int y) {
+        // El mouse viene en pixeles del editor; el modelo guarda coordenadas
+        // 0..1 para que el resultado no dependa del tamaño de esta ventana.
         if (!dragging_) return;
         OverlayItem* item = Selected();
         if (!item) return;
@@ -674,6 +687,8 @@ private:
 
     static std::shared_ptr<const OverlayImagePixels> DecodePng(
             const std::wstring& path, std::wstring& error) {
+        // WIC decodifica PNG a BGRA premultiplicado, justo como Direct2D lo pide.
+        // Asi respetamos transparencia sin traer otra libreria de imagenes.
         IWICImagingFactory* factory = nullptr;
         IWICBitmapDecoder* decoder = nullptr;
         IWICBitmapFrameDecode* frame = nullptr;
@@ -694,19 +709,26 @@ private:
         UINT width = 0;
         UINT height = 0;
         if (SUCCEEDED(hr)) hr = converter->GetSize(&width, &height);
-        if (SUCCEEDED(hr) && (!width || !height || width > 16384 || height > 16384)) {
+        const std::uint64_t pixelCount = static_cast<std::uint64_t>(width) * height;
+        if (SUCCEEDED(hr) && (!width || !height || width > 8192 || height > 8192 ||
+                              pixelCount > 32ull * 1024ull * 1024ull)) {
             hr = E_INVALIDARG;
         }
         std::shared_ptr<OverlayImagePixels> pixels;
         if (SUCCEEDED(hr)) {
-            pixels = std::make_shared<OverlayImagePixels>();
-            pixels->width = width;
-            pixels->height = height;
-            pixels->stride = width * 4;
-            pixels->bgraPremultiplied.resize(static_cast<size_t>(pixels->stride) * height);
-            hr = converter->CopyPixels(nullptr, pixels->stride,
-                                       static_cast<UINT>(pixels->bgraPremultiplied.size()),
-                                       pixels->bgraPremultiplied.data());
+            try {
+                pixels = std::make_shared<OverlayImagePixels>();
+                pixels->width = width;
+                pixels->height = height;
+                pixels->stride = width * 4;
+                pixels->bgraPremultiplied.resize(static_cast<size_t>(pixels->stride) * height);
+                hr = converter->CopyPixels(nullptr, pixels->stride,
+                                           static_cast<UINT>(pixels->bgraPremultiplied.size()),
+                                           pixels->bgraPremultiplied.data());
+            } catch (const std::bad_alloc&) {
+                pixels.reset();
+                hr = E_OUTOFMEMORY;
+            }
         }
         Release(converter);
         Release(frame);
@@ -723,6 +745,8 @@ private:
     }
 
     void Publish() {
+        // revision ayuda a distinguir una configuracion nueva aunque las capas
+        // tengan el mismo numero de elementos.
         ++config_.revision;
         if (callback_) callback_(config_);
     }

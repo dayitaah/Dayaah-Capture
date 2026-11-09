@@ -45,15 +45,28 @@
 #include "mode_selection.h"
 #include "overlay_editor.h"
 #include "overlay_renderer.h"
+#include "performance_telemetry.h"
 #include "window_behavior.h"
 #include "video_effects_editor.h"
 #include "video_effects_renderer.h"
 #include "video_effects_settings.h"
 
+// ============================================================================
+// Dayaah Capture, explicado sin hablar como manual de licuadora
+// ----------------------------------------------------------------------------
+// El viaje del frame es mas o menos asi:
+// capturadora -> Media Foundation -> guardamos SOLO el frame mas nuevo ->
+// D3D11 lo convierte/dibuja -> overlays -> Present() -> tu monitor.
+//
+// Lo de guardar solo el mas nuevo es intencional: esto es un viewer de baja
+// latencia, no una grabadora. Si un frame ya llego tarde, enseñarlo nomas
+// aumentaria la cola y terminariamos jugando en el pasado jajaja.
+// ============================================================================
+
 constexpr UINT WM_DAYAAH_EFFECTS_ERROR = WM_APP + 19;
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 
-inline constexpr const wchar_t* kAppTitle = L"Dayaah Capture 2.0.1";
+inline constexpr const wchar_t* kAppTitle = L"Dayaah Capture 2.2.0";
 inline constexpr const wchar_t* kGithubUrl = L"https://github.com/dayitaah/Dayaah-Capture";
 inline constexpr const wchar_t* kKofiUrl = L"https://ko-fi.com/dayaah";
 
@@ -65,6 +78,13 @@ static const GUID kWaveSubtypeFloat = {
     0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}
 };
 
+// Algunos headers de MinGW se hacen mensos y no traen MF_LOW_LATENCY aunque
+// Windows si lo soporta. Este es el GUID oficial puesto aqui para que el build
+// portable no pierda justamente la funcion que mas nos importa.
+static const GUID kMfLowLatency = {
+    0x9c27891a, 0xed7a, 0x40e1, {0x88, 0xe8, 0xb2, 0x27, 0x27, 0xa0, 0x24, 0xee}
+};
+
 template <typename T> static void SafeRelease(T*& value) {
     if (value) {
         value->Release();
@@ -72,6 +92,30 @@ template <typename T> static void SafeRelease(T*& value) {
     }
 }
 
+// SRWLOCK ya viene con Windows y no necesita Initialize/Delete. Estas dos
+// guarditas evitan que un return olvidado deje el candado puesto para siempre.
+class SharedSrwGuard {
+public:
+    explicit SharedSrwGuard(SRWLOCK& lock) : lock_(lock) { AcquireSRWLockShared(&lock_); }
+    ~SharedSrwGuard() { ReleaseSRWLockShared(&lock_); }
+    SharedSrwGuard(const SharedSrwGuard&) = delete;
+    SharedSrwGuard& operator=(const SharedSrwGuard&) = delete;
+private:
+    SRWLOCK& lock_;
+};
+
+class ExclusiveSrwGuard {
+public:
+    explicit ExclusiveSrwGuard(SRWLOCK& lock) : lock_(lock) { AcquireSRWLockExclusive(&lock_); }
+    ~ExclusiveSrwGuard() { ReleaseSRWLockExclusive(&lock_); }
+    ExclusiveSrwGuard(const ExclusiveSrwGuard&) = delete;
+    ExclusiveSrwGuard& operator=(const ExclusiveSrwGuard&) = delete;
+private:
+    SRWLOCK& lock_;
+};
+
+// Estas ayuditas viven aqui porque casi todo el programa necesita saber donde
+// esta el EXE, escribir el log o convertir un HRESULT feo en algo entendible.
 static std::wstring ModuleDirectory() {
     wchar_t path[MAX_PATH]{};
     GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -108,8 +152,10 @@ static void LogLine(const wchar_t* format, ...) {
                  time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, message);
 
     int bytesNeeded = WideCharToMultiByte(CP_UTF8, 0, line, -1, nullptr, 0, nullptr, nullptr);
+    if (bytesNeeded <= 0) return;
     std::vector<char> utf8(static_cast<size_t>(bytesNeeded));
-    WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8.data(), bytesNeeded, nullptr, nullptr);
+    if (WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8.data(), bytesNeeded,
+                            nullptr, nullptr) <= 0) return;
 
     EnterCriticalSection(&lock);
     std::wstring path = JoinPath(ModuleDirectory(), L"DayaahCapture.log");
@@ -197,6 +243,9 @@ static const wchar_t* FormatNotice(const GUID& subtype, AppLanguage language) {
     return L"";
 }
 
+// Un VideoMode es una combinacion REAL anunciada por la capturadora. No
+// inventamos 1080p120 porque se vea bonito en el menu: si el driver no lo
+// reporta, no existe para nosotros.
 struct VideoMode {
     UINT32 width = 0;
     UINT32 height = 0;
@@ -241,6 +290,20 @@ struct AudioDeviceInfo {
     IMMDevice* device = nullptr;
 };
 
+struct RenderTiming {
+    double processingMs = 0.0;
+    double presentMs = 0.0;
+};
+
+struct ViewerNotice {
+    std::wstring text;
+    ULONGLONG startedAt = 0;
+    ULONGLONG durationMs = 0;
+};
+
+// Aqui vive la parte que convierte un frame crudo de la capturadora en pixeles
+// visibles. D3D11 Video Processor hace el trabajo pesado en la GPU y la swap
+// chain se encarga de entregarlo al monitor.
 class D3DVideoRenderer {
 public:
     ~D3DVideoRenderer() { Shutdown(); }
@@ -292,6 +355,8 @@ public:
             return hr;
         }
 
+        // Preguntamos antes de usar tearing. Cuando Windows y el monitor lo
+        // permiten, esta es tambien la ruta que deja trabajar al VRR.
         allowTearing_ = false;
         IDXGIFactory5* factory5 = nullptr;
         if (SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&factory5)))) {
@@ -308,6 +373,8 @@ public:
         UINT width = std::max<LONG>(client.right - client.left, 16);
         UINT height = std::max<LONG>(client.bottom - client.top, 16);
 
+        // Flip discard + dos buffers + latencia maxima de un frame. En pocas
+        // palabras: una swap chain moderna sin hacer una fila del OXXO.
         DXGI_SWAP_CHAIN_DESC1 desc{};
         desc.Width = width;
         desc.Height = height;
@@ -336,6 +403,8 @@ public:
         if (SUCCEEDED(hr)) hr = overlayRenderer_.Initialize();
         if (FAILED(hr)) return hr;
 
+        // Esta textura recibe exactamente el formato nativo elegido. Evitamos
+        // que Media Foundation meta conversiones sorpresa por CPU.
         D3D11_TEXTURE2D_DESC inputDesc{};
         inputDesc.Width = inputWidth_;
         inputDesc.Height = inputHeight_;
@@ -382,8 +451,14 @@ public:
     HRESULT Render(const BYTE* data, size_t size, LONG sourceStride,
                    const std::shared_ptr<const OverlayConfig>& overlayConfig,
                    const OverlayStats& overlayStats, const VideoEffects& effects,
-                   bool latencyHud, double* presentDurationMs) {
+                   bool latencyHud, RenderTiming* timing) {
         if (!data || !inputTexture_ || !processor_ || !outputView_) return E_POINTER;
+        LARGE_INTEGER frequency{};
+        LARGE_INTEGER processingStarted{};
+        LARGE_INTEGER processingFinished{};
+        LARGE_INTEGER presentFinished{};
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&processingStarted);
         UINT rowPitch = inputWidth_;
         size_t expected = static_cast<size_t>(inputWidth_) * inputHeight_ * 3 / 2;
         if (inputFormat_ == DXGI_FORMAT_YUY2) {
@@ -398,6 +473,8 @@ public:
         }
         if (size < expected || sourceStride != static_cast<LONG>(rowPitch)) return MF_E_BUFFERTOOSMALL;
 
+        // Subimos el frame a la textura. De aqui en adelante el trabajo queda
+        // en la GPU: conversion de color, escalado, efectos y overlays.
         context_->UpdateSubresource(inputTexture_, 0, nullptr, data, rowPitch,
                                     static_cast<UINT>(expected));
 
@@ -417,7 +494,8 @@ public:
             effectsRenderer_.BeforeResize();
             effectsUnavailableReported_ = true;
             PostMessageW(window_, WM_DAYAAH_EFFECTS_ERROR, 0, static_cast<LPARAM>(hr));
-            // Retry the same frame on the direct path; keep audio/capture alive.
+            // Si un shader truena, reintentamos ESTE MISMO frame por la ruta
+            // directa. Nada de tumbar audio y captura por un efecto coqueto.
             hr = videoContext_->VideoProcessorBlt(processor_, outputView_, 0, 1, &stream);
         }
         if (effects.HasWork() && !effectsRenderer_.Ready() && !effectsUnavailableReported_) {
@@ -428,17 +506,19 @@ public:
         hr = overlayRenderer_.Draw(overlayConfig, overlayStats, contentRect_, latencyHud);
         if (FAILED(hr)) return hr;
         const bool lowLatency = lowLatency_.load();
-        LARGE_INTEGER frequency{};
-        LARGE_INTEGER started{};
-        LARGE_INTEGER finished{};
-        QueryPerformanceFrequency(&frequency);
-        QueryPerformanceCounter(&started);
+        QueryPerformanceCounter(&processingFinished);
+        // Present(0) = no esperar VSync. Present(1) = sincronizar. El flag de
+        // tearing solo se manda cuando DXGI confirmo que se puede usar.
         const HRESULT presentHr = swapChain_->Present(lowLatency ? 0 : 1,
             lowLatency && allowTearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
-        QueryPerformanceCounter(&finished);
-        if (presentDurationMs && frequency.QuadPart > 0) {
-            *presentDurationMs = static_cast<double>(finished.QuadPart - started.QuadPart) *
-                                 1000.0 / static_cast<double>(frequency.QuadPart);
+        QueryPerformanceCounter(&presentFinished);
+        if (timing && frequency.QuadPart > 0) {
+            timing->processingMs = static_cast<double>(processingFinished.QuadPart -
+                                                        processingStarted.QuadPart) *
+                                   1000.0 / static_cast<double>(frequency.QuadPart);
+            timing->presentMs = static_cast<double>(presentFinished.QuadPart -
+                                                     processingFinished.QuadPart) *
+                                1000.0 / static_cast<double>(frequency.QuadPart);
         }
         return presentHr;
     }
@@ -478,6 +558,9 @@ private:
         const bool fullRange = inputFullRange_.load();
         if (colorSpaceApplied_ && appliedInputFullRange_ == fullRange) return;
 
+        // Peritas y manzanas: muchas capturadoras mandan negro=16 y blanco=235.
+        // Si el usuario dice que la señal es rango completo usamos 0..255 para
+        // que los negros no se vean lavados ni nos comamos detalle.
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputColor{};
         inputColor.YCbCr_Matrix = inputIsRgb_ ? 0 : 1;
         inputColor.RGB_Range = 0;
@@ -589,6 +672,8 @@ private:
         backBuffer->Release();
         if (FAILED(hr)) return hr;
 
+        // Conservamos la proporcion y dejamos barras negras si hace falta. No
+        // vamos a estirar a Cloud para que parezca tamal nomas por llenar todo.
         RECT source{0, 0, static_cast<LONG>(inputWidth_), static_cast<LONG>(inputHeight_)};
         RECT target{0, 0, static_cast<LONG>(outputWidth), static_cast<LONG>(outputHeight)};
         const double inputAspect = static_cast<double>(inputWidth_) / inputHeight_;
@@ -651,6 +736,8 @@ private:
     ID3D11VideoProcessorOutputView* outputView_ = nullptr;
 };
 
+// WASAPI puede darnos 8/16/24/32 bits o float. Estas dos funciones traducen
+// todo a float para procesarlo igual y luego lo regresan al formato de salida.
 static bool WaveFormatIsFloat(const WAVEFORMATEX* format) {
     if (format->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) return true;
     if (format->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
@@ -702,13 +789,11 @@ static void WriteWaveSample(BYTE* data, UINT32 sampleIndex,
     }
 }
 
+// Puente de audio: toma la entrada de la capturadora y la manda al dispositivo
+// de reproduccion predeterminado. Lleva su propio hilo para no amarrar el video.
 class AudioBridge {
 public:
-    AudioBridge() { InitializeCriticalSection(&stateLock_); }
-    ~AudioBridge() {
-        Stop();
-        DeleteCriticalSection(&stateLock_);
-    }
+    ~AudioBridge() { Stop(); }
 
     HRESULT Start(IMMDevice* captureDevice, int gainDb) {
         Stop();
@@ -818,6 +903,8 @@ private:
         renderClient_->Start();
         captureClient_->Start();
 
+        // WASAPI nos despierta solo cuando hay audio que leer o espacio que
+        // llenar. Menos vueltas inutiles, menos latencia y menos CPU.
         HANDLE events[] = {stopEvent_, captureEvent_, renderEvent_};
         while (running_.load()) {
             DWORD wait = WaitForMultipleObjects(_countof(events), events, FALSE, 1000);
@@ -859,6 +946,9 @@ private:
     }
 
     void ResampleAvailable() {
+        // Interpolacion lineal sencilla para casar la frecuencia de la entrada
+        // con la salida de Windows. Para un monitor de capturadora es rapida,
+        // estable y no mete una biblioteca enorme al EXE.
         const size_t sourceFrames = sourceStereo_.size() / 2;
         const double step = static_cast<double>(captureFormat_->nSamplesPerSec) /
                             static_cast<double>(renderFormat_->nSamplesPerSec);
@@ -883,6 +973,8 @@ private:
         const size_t availableFrames = (outputStereo_.size() - outputRead_) / 2;
         const size_t maximumFrames = renderFormat_->nSamplesPerSec / 25;
         const size_t targetFrames = renderFormat_->nSamplesPerSec / 100;
+        // Si el audio se atraso, tiramos lo viejo y volvemos al presente. Dejar
+        // crecer la cola conservaria cada muestra, si, pero desincronizada.
         if (availableFrames > maximumFrames) {
             outputRead_ += (availableFrames - targetFrames) * 2;
             LogLine(L"Audio: cola vieja descartada para volver al directo");
@@ -926,7 +1018,6 @@ private:
         }
     }
 
-    CRITICAL_SECTION stateLock_{};
     std::atomic<bool> running_{false};
     HANDLE thread_ = nullptr;
     HANDLE captureEvent_ = nullptr;
@@ -948,9 +1039,13 @@ private:
 
 class DayaahApp;
 
+// Media Foundation llama este objeto desde su propio hilo cada vez que llega
+// un frame. El callback se mantiene chiquito: entrega el frame a DayaahApp y
+// pide el siguiente. Nada de pintar ventanas desde aqui.
 class SourceReaderCallback final : public IMFSourceReaderCallback {
 public:
-    explicit SourceReaderCallback(DayaahApp* app) : app_(app) {}
+    SourceReaderCallback(DayaahApp* app, std::uint64_t sessionId)
+        : app_(app), sessionId_(sessionId) {}
     STDMETHODIMP QueryInterface(REFIID iid, void** object) override;
     STDMETHODIMP_(ULONG) AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&refs_)); }
     STDMETHODIMP_(ULONG) Release() override {
@@ -962,11 +1057,19 @@ public:
                               LONGLONG timestamp, IMFSample* sample) override;
     STDMETHODIMP OnEvent(DWORD, IMFMediaEvent*) override { return S_OK; }
     STDMETHODIMP OnFlush(DWORD) override;
+    void Detach() {
+        // Exclusivo espera a que terminen todos los callbacks que ya traian el
+        // lock compartido. Despues de esto nadie vuelve a tocar DayaahApp.
+        ExclusiveSrwGuard guard(appLock_);
+        app_ = nullptr;
+    }
 
 private:
     ~SourceReaderCallback() = default;
     LONG refs_ = 1;
+    SRWLOCK appLock_ = SRWLOCK_INIT;
     DayaahApp* app_ = nullptr;
+    const std::uint64_t sessionId_ = 0;
 };
 
 enum : int {
@@ -983,6 +1086,7 @@ enum : int {
     IDC_STATUS = 1011,
     IDC_KOFI = 1012,
     IDC_GITHUB = 1013,
+    IDC_AUTOTUNE = 1014,
     IDM_FULLSCREEN = 2000,
     IDM_MUTE,
     IDM_VSYNC,
@@ -993,6 +1097,9 @@ enum : int {
     IDM_EFFECTS_TOGGLE,
     IDM_EFFECTS_EDITOR,
     IDM_LATENCY_HUD,
+    IDM_PACING_SCOPE,
+    IDM_AUTOTUNE,
+    IDM_PICTURE_IN_PICTURE,
     IDM_SETTINGS,
     IDM_GAIN = 2500,
     IDM_RESOLUTION = 2600,
@@ -1000,9 +1107,11 @@ enum : int {
     IDM_FORMAT = 2800
 };
 
-constexpr UINT WM_DAYAAH_FRAME = WM_APP + 17;
 constexpr UINT WM_DAYAAH_CAPTURE_ERROR = WM_APP + 18;
 
+// Esta es la mera mera: crea la ventana, arranca/detiene la captura, coordina
+// los hilos y guarda la configuracion. No procesa todo ella sola; mas bien es
+// la directora de orquesta para que video, audio y UI no se agarren a golpes.
 class DayaahApp {
 public:
     DayaahApp() {
@@ -1025,7 +1134,9 @@ public:
         CoUninitialize();
     }
 
-    HRESULT Initialize(HINSTANCE instance, bool forceSettings) {
+    HRESULT Initialize(HINSTANCE instance, bool forceSettings, HRESULT phoenixFailure) {
+        // COM y Media Foundation van primero porque casi todo lo demas depende
+        // de ellos. Si algo falla aqui, mejor parar limpio que abrir media app.
         instance_ = instance;
         HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         if (FAILED(hr)) return hr;
@@ -1080,14 +1191,25 @@ public:
         CreateControls();
         SetTimer(window_, 1, 1000, nullptr);
         SetTimer(window_, 2, 100, nullptr);
+        SetTimer(window_, 5, 250, nullptr);
 
         EnumerateDevices();
         PopulateControls();
+        if (FAILED(phoenixFailure)) {
+            SetWindowTextW(statusText_, Tr(language_,
+                L"Phoenix no pudo recuperar la captura. Revisa las conexiones y vuelve a iniciar.",
+                L"Phoenix could not recover capture. Check the connections and start again."));
+        }
         RestoreOverlaySettings();
         effectsSettings_ = video_effects_settings::Load(IniPath());
         effectsPacked_.store(effectsSettings_.Pack());
         latencyHudEnabled_.store(GetPrivateProfileIntW(
             L"capture", L"latency_hud", 0, IniPath().c_str()) == 1);
+        pacingScopeEnabled_.store(GetPrivateProfileIntW(
+            L"capture", L"pacing_scope", 0, IniPath().c_str()) == 1);
+        // El primer arranque se guarda junto con una huella de la PC. Asi, si
+        // alguien copia el ZIP a otra maquina, Configuracion vuelve a aparecer
+        // y no intenta arrancar a ciegas con dispositivos que ya no existen.
         const std::wstring savedFingerprint = ReadFirstRunSetting(L"device", L"");
         const std::wstring firstRunMarker = ReadFirstRunSetting(L"Firstrun", L"false");
         const bool completed = firstRunMarker == L"true" || GetPrivateProfileIntW(
@@ -1115,8 +1237,18 @@ public:
         return static_cast<int>(message.wParam);
     }
 
-    void OnVideoSample(IMFSample* sample) {
-        if (!running_.load() || !sample) return;
+    bool IsActiveSession(std::uint64_t sessionId) const {
+        return running_.load() && activeSession_.load() == sessionId;
+    }
+
+    void OnVideoSample(std::uint64_t sessionId, IMFSample* sample,
+                       LONGLONG sourceTimestamp) {
+        // Media Foundation puede entregar buffers 2D con padding o un buffer
+        // plano. Copiamos directo a un buffer reciclable; asi no apartamos y
+        // copiamos otros 12 MB dos veces por cada frame 4K nomas porque si.
+        if (!IsActiveSession(sessionId) || !sample) return;
+        ExclusiveSrwGuard producerGuard(sampleLock_);
+        if (!IsActiveSession(sessionId)) return;
         IMFMediaBuffer* buffer = nullptr;
         IMF2DBuffer* buffer2d = nullptr;
         BYTE* flat = nullptr;
@@ -1125,27 +1257,86 @@ public:
 
         HRESULT hr = sample->ConvertToContiguousBuffer(&buffer);
         if (FAILED(hr)) return;
-        hr = buffer->QueryInterface(IID_PPV_ARGS(&buffer2d));
-
         const size_t tightSize = TightFrameSize(activeMode_.subtype,
                                                 activeMode_.width, activeMode_.height);
-        std::vector<BYTE> native;
-        if (SUCCEEDED(hr)) {
+        if (!tightSize) {
+            SafeRelease(buffer);
+            return;
+        }
+
+        const bool i420 = activeMode_.subtype == MFVideoFormat_I420;
+        std::vector<BYTE>& copied = i420 ? captureI420Native_ : captureFrame_;
+        hr = buffer->QueryInterface(IID_PPV_ARGS(&buffer2d));
+
+        // Lock2D deja copiar fila por fila y se come el padding del driver sin
+        // fabricar otro vector intermedio. I420 se queda en la ruta contigua
+        // porque sus planos U/V usan otro stride y luego hay que intercalarlos.
+        if (SUCCEEDED(hr) && !i420) {
+            BYTE* scanline = nullptr;
+            LONG pitch = 0;
+            hr = buffer2d->Lock2D(&scanline, &pitch);
+            if (SUCCEEDED(hr)) {
+                const size_t sourcePitch = pitch < 0
+                    ? static_cast<size_t>(-static_cast<LONGLONG>(pitch))
+                    : static_cast<size_t>(pitch);
+                const size_t rowBytes = TightRowPitch(activeMode_.subtype,
+                                                       activeMode_.width);
+                const bool planar = activeMode_.subtype == MFVideoFormat_NV12 ||
+                                    activeMode_.subtype == MFVideoFormat_P010;
+                if (!scanline || sourcePitch < rowBytes || (planar && pitch < 0)) {
+                    hr = MF_E_BUFFERTOOSMALL;
+                } else {
+                    copied.resize(tightSize);
+                    BYTE* destination = copied.data();
+                    for (UINT32 row = 0; row < activeMode_.height; ++row) {
+                        memcpy(destination + static_cast<size_t>(row) * rowBytes,
+                               scanline + static_cast<LONG_PTR>(row) * pitch, rowBytes);
+                    }
+                    if (planar) {
+                        const BYTE* sourceUv = scanline +
+                            static_cast<LONG_PTR>(activeMode_.height) * pitch;
+                        BYTE* destinationUv = destination +
+                            static_cast<size_t>(activeMode_.height) * rowBytes;
+                        for (UINT32 row = 0; row < activeMode_.height / 2; ++row) {
+                            memcpy(destinationUv + static_cast<size_t>(row) * rowBytes,
+                                   sourceUv + static_cast<LONG_PTR>(row) * pitch, rowBytes);
+                        }
+                    }
+                }
+                buffer2d->Unlock2D();
+            }
+        } else if (SUCCEEDED(hr)) {
+            // I420: pedimos la vista contigua una vez y convertimos desde este
+            // buffer persistente; no hay assign ni relleno nuevo cada frame.
             DWORD contiguous = 0;
             hr = buffer2d->GetContiguousLength(&contiguous);
             if (SUCCEEDED(hr) && contiguous >= tightSize) {
-                native.resize(contiguous);
-                hr = buffer2d->ContiguousCopyTo(native.data(), contiguous);
+                copied.resize(contiguous);
+                hr = buffer2d->ContiguousCopyTo(copied.data(), contiguous);
+            } else if (SUCCEEDED(hr)) {
+                hr = MF_E_BUFFERTOOSMALL;
+            }
+        }
+
+        // Algunos drivers anuncian IMF2DBuffer pero fallan Lock2D. Conservamos
+        // la salida contigua y, si tambien se hace mensa, el Lock plano de toda
+        // la vida para no perder compatibilidad con capturadoras raritas.
+        if (FAILED(hr) && buffer2d) {
+            DWORD contiguous = 0;
+            hr = buffer2d->GetContiguousLength(&contiguous);
+            if (SUCCEEDED(hr) && contiguous >= tightSize) {
+                copied.resize(contiguous);
+                hr = buffer2d->ContiguousCopyTo(copied.data(), contiguous);
             } else if (SUCCEEDED(hr)) {
                 hr = MF_E_BUFFERTOOSMALL;
             }
         }
         if (FAILED(hr)) {
-            native.clear();
             hr = buffer->Lock(&flat, &maximum, &current);
             if (SUCCEEDED(hr)) {
                 if (current >= tightSize) {
-                    native.assign(flat, flat + tightSize);
+                    copied.resize(tightSize);
+                    memcpy(copied.data(), flat, tightSize);
                 } else {
                     hr = MF_E_BUFFERTOOSMALL;
                 }
@@ -1156,32 +1347,45 @@ public:
         SafeRelease(buffer);
         if (FAILED(hr)) return;
 
-        std::vector<BYTE> incoming;
         LONG incomingStride = 0;
-        if (activeMode_.subtype == MFVideoFormat_I420) {
+        if (i420) {
+            // I420 trae U y V en dos planos separados. D3D11 entiende mejor
+            // NV12, asi que aqui los intercalamos como UVUVUV. Es la posible
+            // penalizacion que avisamos al lado del selector de formato.
             const size_t ySize = static_cast<size_t>(activeMode_.width) * activeMode_.height;
             const size_t chromaSize = ySize / 4;
-            if (native.size() < ySize + chromaSize * 2) return;
-            incoming.resize(ySize + chromaSize * 2);
-            memcpy(incoming.data(), native.data(), ySize);
-            const BYTE* u = native.data() + ySize;
+            if (captureI420Native_.size() < ySize + chromaSize * 2) return;
+            captureFrame_.resize(ySize + chromaSize * 2);
+            memcpy(captureFrame_.data(), captureI420Native_.data(), ySize);
+            const BYTE* u = captureI420Native_.data() + ySize;
             const BYTE* v = u + chromaSize;
-            BYTE* uv = incoming.data() + ySize;
+            BYTE* uv = captureFrame_.data() + ySize;
             for (size_t i = 0; i < chromaSize; ++i) {
                 uv[i * 2] = u[i];
                 uv[i * 2 + 1] = v[i];
             }
             incomingStride = static_cast<LONG>(activeMode_.width);
         } else {
-            incoming.assign(native.begin(), native.begin() + tightSize);
             incomingStride = static_cast<LONG>(TightRowPitch(activeMode_.subtype,
                                                               activeMode_.width));
         }
 
+        if (!IsActiveSession(sessionId)) return;
+
         const ULONGLONG arrival = GetTickCount64();
+        LARGE_INTEGER counter{};
+        LARGE_INTEGER frequency{};
+        QueryPerformanceCounter(&counter);
+        QueryPerformanceFrequency(&frequency);
+        // No hacemos una cola infinita. Si habia un frame pendiente lo
+        // reemplazamos con este porque el nuevo esta mas cerquita del presente.
         EnterCriticalSection(&frameLock_);
-        if (framePending_) discardedFrames_++;
-        latestFrame_.swap(incoming);
+        framePacing_.Add(sourceTimestamp, counter.QuadPart, frequency.QuadPart);
+        if (framePending_) {
+            discardedFrames_++;
+            governorDiscardedFrames_++;
+        }
+        latestFrame_.swap(captureFrame_);
         latestFrameArrivalTick_ = arrival;
         latestFrameStride_ = incomingStride;
         framePending_ = true;
@@ -1191,24 +1395,36 @@ public:
         if (frameReadyEvent_) SetEvent(frameReadyEvent_);
     }
 
-    void ContinueReading() {
-        if (running_.load() && reader_) {
-            reader_->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
-                                nullptr, nullptr, nullptr, nullptr);
+    HRESULT ContinueReading(std::uint64_t sessionId) {
+        IMFSourceReader* reader = nullptr;
+        {
+            SharedSrwGuard guard(readerLock_);
+            if (running_.load() && activeSession_.load() == sessionId && reader_) {
+                reader = reader_;
+                reader->AddRef();
+            }
         }
+        if (!reader) return MF_E_SHUTDOWN;
+        const HRESULT hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
+                                              nullptr, nullptr, nullptr, nullptr);
+        reader->Release();
+        return hr;
     }
 
-    void ReaderFlushed() {
-        if (flushEvent_) SetEvent(flushEvent_);
+    void ReaderFlushed(std::uint64_t sessionId) {
+        if (activeSession_.load() == sessionId && flushEvent_) SetEvent(flushEvent_);
     }
 
-    void ReaderError(HRESULT hr) {
+    void ReaderError(std::uint64_t sessionId, HRESULT hr) {
+        if (!IsActiveSession(sessionId)) return;
         captureError_.store(hr);
         PostMessageW(window_, WM_DAYAAH_CAPTURE_ERROR, 0, 0);
     }
 
 private:
     static LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+        // Windows solo conoce una funcion estatica. Guardamos el puntero real
+        // de DayaahApp dentro de la ventana para reenviar cada mensaje a su casa.
         DayaahApp* app = reinterpret_cast<DayaahApp*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         if (message == WM_NCCREATE) {
             auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
@@ -1221,6 +1437,8 @@ private:
     }
 
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
+        // El famoso switch de Win32: aqui caen botones, timers, mouse, hotkeys,
+        // resize y el cierre. Feito pero honesto, y no mete frameworks pesados.
         switch (message) {
         case WM_COMMAND:
             return OnCommand(LOWORD(wParam), HIWORD(wParam));
@@ -1243,7 +1461,7 @@ private:
             }
             return 0;
         case WM_DAYAAH_EFFECTS_ERROR:
-            if (effectsSettings_.enabled) {
+            if (effectsSettings_.enabled && !pictureInPicture_) {
                 effectsSettings_.enabled = false;
                 PublishEffects(effectsSettings_);
                 MessageBoxW(window_, Tr(language_,
@@ -1254,22 +1472,13 @@ private:
             return 0;
         case WM_DAYAAH_CAPTURE_ERROR: {
             HRESULT hr = captureError_.load();
-            if (fullscreen_) ToggleFullscreen();
-            StopCapture();
-            ShowSetup(true);
-            std::wstring text = std::wstring(Tr(language_,
-                L"La captura se detuvo:\n\n", L"Capture stopped:\n\n")) + HrText(hr) +
-                Tr(language_,
-                    L"\n\nAbre un Issue en GitHub y adjunta DayaahCapture.log:\n",
-                    L"\n\nOpen a GitHub Issue and attach DayaahCapture.log:\n") +
-                L"https://github.com/dayitaah/Dayaah-Capture/issues";
-            MessageBoxW(window_, text.c_str(), L"Dayaah Capture", MB_ICONERROR);
+            ScheduleRecovery(hr);
             return 0;
         }
         case WM_GETMINMAXINFO: {
             auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
-            limits->ptMinTrackSize.x = capturingUi_ ? 320 : 900;
-            limits->ptMinTrackSize.y = capturingUi_ ? 240 : 790;
+            limits->ptMinTrackSize.x = pictureInPicture_ ? 320 : (capturingUi_ ? 320 : 900);
+            limits->ptMinTrackSize.y = pictureInPicture_ ? 180 : (capturingUi_ ? 240 : 790);
             return 0;
         }
         case WM_SIZE:
@@ -1280,10 +1489,11 @@ private:
             }
             return 0;
         case WM_TIMER:
-            if (wParam == 1) UpdateFpsTitle();
+            if (wParam == 1) { UpdateFpsTitle(); UpdateAutoTune(); MaybeShowCadenceWarning(); }
             else if (wParam == 2) UpdateCursorVisibility();
             else if (wParam == 3) FlushOverlaySettings();
             else if (wParam == 4) FlushEffectsSettings();
+            else if (wParam == 5) UpdateRecoveryAndHealth();
             return 0;
         case WM_SETCURSOR:
             if (LOWORD(lParam) == HTCLIENT) {
@@ -1310,6 +1520,17 @@ private:
         case WM_NCMOUSEMOVE:
             SetCaptureCursorHidden(false);
             return DefWindowProcW(window_, message, wParam, lParam);
+        case WM_NCHITTEST: {
+            const LRESULT hit = DefWindowProcW(window_, message, wParam, lParam);
+            if (pictureInPicture_ && hit == HTCLIENT) return HTCAPTION;
+            return hit;
+        }
+        case WM_NCLBUTTONDBLCLK:
+            if (pictureInPicture_ && wParam == HTCAPTION) {
+                ToggleFullscreen();
+                return 0;
+            }
+            return DefWindowProcW(window_, message, wParam, lParam);
         case WM_ACTIVATEAPP:
             SetCaptureCursorHidden(false);
             lastMouseMove_ = GetTickCount64();
@@ -1319,30 +1540,36 @@ private:
             SetCaptureCursorHidden(false);
             return 0;
         case WM_EXITSIZEMOVE:
+            if (pictureInPicture_) SavePictureInPictureBounds();
             lastMouseMove_ = GetTickCount64();
             hasLastCursorPosition_ = false;
             return 0;
         case WM_KEYDOWN:
-            if (wParam == VK_F6 && !(lParam & (1LL << 30)) && running_.load()) ToggleEffects();
-            else if (wParam == VK_F7 && !(lParam & (1LL << 30)) && running_.load()) OpenEffectsEditor();
+            // Hotkeys del viewer. El bit 30 evita repetir la accion si alguien
+            // deja la tecla aplastada como si le debiera dinero.
+            if (wParam == VK_F6 && !(lParam & (1LL << 30)) && running_.load() && !pictureInPicture_) ToggleEffects();
+            else if (wParam == VK_F7 && !(lParam & (1LL << 30)) && running_.load() && !pictureInPicture_) OpenEffectsEditor();
             else if (wParam == VK_F8 && !(lParam & (1LL << 30)) && running_.load()) ToggleLatencyHud();
+            else if (wParam == VK_F9 && !(lParam & (1LL << 30)) && running_.load()) TogglePacingScope();
             else if (wParam == VK_F11 && !(lParam & (1LL << 30))) ToggleFullscreen();
+            else if (wParam == VK_F12 && !(lParam & (1LL << 30)) && running_.load()) TogglePictureInPicture();
             else if (wParam == VK_F10 && !(lParam & (1LL << 30)) && running_.load()) {
                 ToggleOverlays();
             }
             else if (wParam == VK_ESCAPE && !(lParam & (1LL << 30))) {
                 const EscapeWindowAction action = DecideEscapeWindowAction(
-                    running_.load(), fullscreen_, IsZoomed(window_) != FALSE);
-                if (action == EscapeWindowAction::LeaveFullscreen) ToggleFullscreen();
+                    running_.load(), pictureInPicture_, fullscreen_, IsZoomed(window_) != FALSE);
+                if (action == EscapeWindowAction::LeavePictureInPicture) TogglePictureInPicture();
+                else if (action == EscapeWindowAction::LeaveFullscreen) ToggleFullscreen();
                 else if (action == EscapeWindowAction::RestoreMaximized)
                     ShowWindow(window_, SW_RESTORE);
-            } else if (wParam == 'M' && running_.load()) {
+            } else if (wParam == 'M' && !(lParam & (1LL << 30)) && running_.load()) {
                 audio_.ToggleMute();
                 UpdateFpsTitle();
             }
             return 0;
         case WM_CHAR:
-            if (running_.load() && !menuOpen_ && discoSecret_.Input(
+            if (running_.load() && !pictureInPicture_ && !menuOpen_ && discoSecret_.Input(
                     static_cast<wchar_t>(wParam), GetTickCount64())) {
                 ToggleDiscoMode();
             }
@@ -1396,6 +1623,8 @@ private:
     }
 
     void CreateControls() {
+        // Todo esto es Win32 puro. Son mas lineas, pero el EXE queda compacto y
+        // abre sin cargar un navegador disfrazado de ventana.
         darkBrush_ = CreateSolidBrush(RGB(10, 13, 18));
         controlBrush_ = CreateSolidBrush(RGB(24, 29, 39));
         font_ = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -1414,6 +1643,11 @@ private:
         gainCombo_ = CreateCombo(IDC_GAIN, 48, 417, 260);
         syncCombo_ = CreateCombo(IDC_SYNC, 326, 417, 526);
         languageCombo_ = CreateCombo(IDC_LANGUAGE, 48, 499, 260);
+        autoTuneButton_ = CreateWindowExW(0, L"BUTTON", L"",
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                                          326, 499, 526, 32, window_,
+                                          reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_AUTOTUNE)),
+                                          instance_, nullptr);
         startButton_ = CreateWindowExW(0, L"BUTTON", L"",
                                        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                        48, 548, 804, 58, window_,
@@ -1429,7 +1663,7 @@ private:
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_GITHUB)), instance_, nullptr);
         HWND controls[] = {videoCombo_, resolutionCombo_, fpsCombo_, formatCombo_, formatNotice_,
                            audioCombo_, gainCombo_, syncCombo_, languageCombo_, statusText_,
-                           kofiLink_, githubLink_};
+                           autoTuneButton_, kofiLink_, githubLink_};
         for (HWND control : controls) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
             SetWindowTheme(control, L"DarkMode_Explorer", nullptr);
@@ -1455,7 +1689,7 @@ private:
         const int syncSelection = std::max(0, ComboBox_GetCurSel(syncCombo_));
         ComboBox_ResetContent(syncCombo_);
         ComboBox_AddString(syncCombo_, Tr(language_,
-            L"Latencia mínima (puede haber tearing)", L"Minimum latency (tearing possible)"));
+            L"Latencia mínima (No VSync - VRR)", L"Minimum latency (No VSync - VRR)"));
         ComboBox_AddString(syncCombo_, Tr(language_,
             L"VSync (cola máxima: 1 cuadro)", L"VSync (maximum queue: 1 frame)"));
         ComboBox_SetCurSel(syncCombo_, std::min(syncSelection, 1));
@@ -1470,6 +1704,7 @@ private:
         UpdateFormatNotice();
         InvalidateRect(window_, nullptr, TRUE);
         if (startButton_) InvalidateRect(startButton_, nullptr, TRUE);
+        if (autoTuneButton_) InvalidateRect(autoTuneButton_, nullptr, TRUE);
     }
 
     void PaintSetup() {
@@ -1496,8 +1731,8 @@ private:
             SetTextColor(dc, RGB(139, 151, 169));
             RECT subtitle{50, 74, 852, 104};
             DrawTextW(dc, Tr(language_,
-                      L"Captura nativa. Un cuadro de cola. Cero adornos.",
-                      L"Native capture. One-frame queue. No bloat."), -1,
+                      L"Ruta nativa. Siempre el frame más reciente. Cero bloat.",
+                      L"Native path. Always the newest frame. No bloat."), -1,
                       &subtitle, DT_LEFT | DT_SINGLELINE);
             const wchar_t* labelsEs[] = {L"DISPOSITIVO DE VIDEO", L"MODO DE VIDEO",
                                          L"ENTRADA DE AUDIO", L"AMPLIFICACIÓN", L"IDIOMA"};
@@ -1598,6 +1833,8 @@ private:
                 SelectObject(item->hDC, oldFont);
                 DeleteObject(brand);
             } else {
+                // Si: este Octocat medio chuequito es INTENCIONAL. Se queda asi
+                // porque da risa y ya es parte del lore de Dayaah Capture jajaja.
                 HBRUSH black = CreateSolidBrush(RGB(20, 20, 20));
                 oldBrush = SelectObject(item->hDC, black);
                 oldPen = SelectObject(item->hDC, GetStockObject(NULL_PEN));
@@ -1630,6 +1867,30 @@ private:
             if (item->itemState & ODS_FOCUS) DrawFocusRect(item->hDC, &item->rcItem);
             return;
         }
+        if (item->CtlID == IDC_AUTOTUNE) {
+            const bool pressed = (item->itemState & ODS_SELECTED) != 0;
+            HBRUSH background = CreateSolidBrush(pressed ? RGB(32, 105, 88) : RGB(27, 74, 66));
+            FillRect(item->hDC, &item->rcItem, background);
+            DeleteObject(background);
+            HPEN border = CreatePen(PS_SOLID, 1, RGB(83, 215, 178));
+            HGDIOBJ oldPen = SelectObject(item->hDC, border);
+            HGDIOBJ oldBrush = SelectObject(item->hDC, GetStockObject(NULL_BRUSH));
+            RoundRect(item->hDC, item->rcItem.left, item->rcItem.top,
+                      item->rcItem.right, item->rcItem.bottom, 7, 7);
+            SelectObject(item->hDC, oldBrush);
+            SelectObject(item->hDC, oldPen);
+            DeleteObject(border);
+            SetBkMode(item->hDC, TRANSPARENT);
+            SetTextColor(item->hDC, RGB(216, 255, 244));
+            HFONT old = static_cast<HFONT>(SelectObject(item->hDC, font_));
+            RECT rect = item->rcItem;
+            DrawTextW(item->hDC, Tr(language_, L"AUTO-OPTIMIZAR CAPTURA",
+                                               L"AUTO-OPTIMIZE CAPTURE"),
+                      -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(item->hDC, old);
+            if (item->itemState & ODS_FOCUS) DrawFocusRect(item->hDC, &item->rcItem);
+            return;
+        }
         if (item->CtlID != IDC_START) return;
         COLORREF color = (item->itemState & ODS_SELECTED) ? RGB(67, 188, 157) : RGB(83, 215, 178);
         HBRUSH brush = CreateSolidBrush(color);
@@ -1645,6 +1906,9 @@ private:
     }
 
     void EnumerateDevices() {
+        // Primero le preguntamos a Media Foundation por video y luego a WASAPI
+        // por entradas de audio. Los nombres vienen del driver, no de una lista
+        // inventada por nosotros.
         IMFAttributes* attributes = nullptr;
         IMFActivate** devices = nullptr;
         UINT32 count = 0;
@@ -1705,6 +1969,9 @@ private:
     }
 
     void EnumerateVideoModes(VideoDeviceInfo& device) {
+        // Solo conservamos formatos crudos que sabemos pintar. MJPEG puede salir
+        // anunciado por la capturadora, pero aqui priorizamos la ruta nativa sin
+        // meter decodificacion adicional en medio.
         IMFMediaSource* source = nullptr;
         IMFSourceReader* reader = nullptr;
         if (FAILED(device.activate->ActivateObject(IID_PPV_ARGS(&source)))) return;
@@ -1747,8 +2014,7 @@ private:
         int preferredVideo = 0;
         for (size_t i = 0; i < videoDevices_.size(); ++i) {
             ComboBox_AddString(videoCombo_, videoDevices_[i].name.c_str());
-            if ((!savedVideo.empty() && videoDevices_[i].name == savedVideo) ||
-                (savedVideo.empty() && videoDevices_[i].name.find(L"UGREEN 25173") != std::wstring::npos)) {
+            if (!savedVideo.empty() && videoDevices_[i].name == savedVideo) {
                 preferredVideo = static_cast<int>(i);
             }
         }
@@ -1768,9 +2034,7 @@ private:
         int preferredAudio = 0;
         for (size_t i = 0; i < audioDevices_.size(); ++i) {
             ComboBox_AddString(audioCombo_, audioDevices_[i].name.c_str());
-            if ((!savedAudio.empty() && audioDevices_[i].name == savedAudio) ||
-                (savedAudio.empty() && (audioDevices_[i].name.find(L"UGREEN 25173") != std::wstring::npos ||
-                 audioDevices_[i].name.find(L"HDMI") != std::wstring::npos))) {
+            if (!savedAudio.empty() && audioDevices_[i].name == savedAudio) {
                 preferredAudio = static_cast<int>(i + 1);
             }
         }
@@ -1793,11 +2057,14 @@ private:
                 L"No encontré una capturadora con un formato compatible.",
                 L"No capture card with a compatible format was found."));
             EnableWindow(startButton_, FALSE);
+            EnableWindow(autoTuneButton_, FALSE);
         } else {
+            EnableWindow(startButton_, TRUE);
+            EnableWindow(autoTuneButton_, TRUE);
             wchar_t status[180]{};
             _snwprintf_s(status, _countof(status), _TRUNCATE, language_ == AppLanguage::English
-                ? L"Ready: %zu raw modes. Right-click: options · F8: latency · F11: fullscreen · M: mute"
-                : L"Listo: %zu modos crudos. Clic derecho: opciones · F8: latencia · F11: pantalla completa · M: silencio",
+                ? L"Ready: %zu raw modes. F8: latency · F9: pacing · F11: fullscreen · F12: PiP · M: mute"
+                : L"Listo: %zu modos crudos. F8: latencia · F9: pacing · F11: pantalla completa · F12: PiP · M: silencio",
                 videoDevices_[preferredVideo].modes.size());
             SetWindowTextW(statusText_, status);
         }
@@ -1805,6 +2072,8 @@ private:
     }
 
     int DefaultModeIndex(int video) const {
+        // Preferencia sensata cuando no hay nada guardado: 1080p60 NV12. Si no
+        // existe, el puntaje va bajando con alternativas compatibles.
         if (video < 0 || video >= static_cast<int>(videoDevices_.size())) return -1;
         int preferred = -1;
         int bestScore = -1;
@@ -1822,6 +2091,9 @@ private:
     }
 
     void PopulateModeSelectors(int video, int preferredMode) {
+        // El driver puede anunciar una lista larguisima. La partimos en tres
+        // pasos: resolucion -> FPS -> formato, para que Configuracion no parezca
+        // menu de restaurante con 800 platillos.
         ComboBox_ResetContent(resolutionCombo_);
         setupResolutions_.clear();
         if (video < 0 || video >= static_cast<int>(videoDevices_.size())) {
@@ -1937,6 +2209,10 @@ private:
         if ((id == IDC_KOFI || id == IDC_GITHUB) && notification == BN_CLICKED) {
             ShellExecuteW(window_, L"open", id == IDC_KOFI ? kKofiUrl : kGithubUrl,
                           nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
+        if (id == IDC_AUTOTUNE && notification == BN_CLICKED) {
+            RunAutoTune();
             return 0;
         }
         if (id == IDC_VIDEO && notification == CBN_SELCHANGE) {
@@ -2170,8 +2446,10 @@ private:
             lastMouseMove_ = GetTickCount64();
             return;
         }
-        auto entry = [](HMENU target, UINT id, const wchar_t* name, bool checked = false) {
-            AppendMenuW(target, MF_STRING | (checked ? MF_CHECKED : 0), id, name);
+        auto entry = [](HMENU target, UINT id, const wchar_t* name,
+                        bool checked = false, bool enabled = true) {
+            AppendMenuW(target, MF_STRING | (checked ? MF_CHECKED : 0) |
+                        (enabled ? 0 : MF_GRAYED), id, name);
         };
 
         HMENU gain = CreatePopupMenu();
@@ -2189,6 +2467,7 @@ private:
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
         entry(menu, IDM_VSYNC, Tr(language_, L"VSync (máximo 1 cuadro)", L"VSync (maximum 1 frame)"), !activeLowLatency_.load());
+        entry(menu, IDM_AUTOTUNE, Tr(language_, L"AutoTune: optimizar captura", L"AutoTune: optimize capture"));
         HMENU colorRange = CreatePopupMenu();
         if (colorRange) {
             entry(colorRange, IDM_COLOR_LIMITED, Tr(language_, L"Limitado (16-235)", L"Limited (16-235)"),
@@ -2199,10 +2478,19 @@ private:
                         Tr(language_, L"Rango de color de entrada", L"Input color range"));
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        entry(menu, IDM_EFFECTS_TOGGLE, Tr(language_, L"Activar efectos de video\tF6", L"Enable video effects\tF6"), effectsSettings_.enabled);
-        entry(menu, IDM_EFFECTS_EDITOR, Tr(language_, L"Ajustar nitidez, color y CRT...\tF7", L"Adjust sharpening, color and CRT...\tF7"));
+        entry(menu, IDM_EFFECTS_TOGGLE, Tr(language_,
+              pictureInPicture_ ? L"Efectos pausados durante PiP" : L"Activar efectos de video\tF6",
+              pictureInPicture_ ? L"Effects paused during PiP" : L"Enable video effects\tF6"),
+              effectsSettings_.enabled, !pictureInPicture_);
+        entry(menu, IDM_EFFECTS_EDITOR,
+              Tr(language_, L"Ajustar nitidez, color y CRT...\tF7",
+                            L"Adjust sharpening, color and CRT...\tF7"),
+              false, !pictureInPicture_);
         entry(menu, IDM_LATENCY_HUD, Tr(language_, L"Latencia aproximada\tF8", L"Estimated latency\tF8"),
               latencyHudEnabled_.load());
+        entry(menu, IDM_PACING_SCOPE, Tr(language_, L"Osciloscopio de frame pacing\tF9",
+                                                     L"Frame pacing scope\tF9"),
+              pacingScopeEnabled_.load());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         const auto overlay = std::atomic_load(&overlayConfig_);
         entry(menu, IDM_OVERLAY_TOGGLE, Tr(language_, L"Mostrar overlays\tF10", L"Show overlays\tF10"),
@@ -2212,6 +2500,9 @@ private:
         BuildModeMenu(menu);
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         entry(menu, IDM_FULLSCREEN, Tr(language_, L"Pantalla completa\tF11", L"Fullscreen\tF11"), fullscreen_);
+        entry(menu, IDM_PICTURE_IN_PICTURE,
+              Tr(language_, L"Imagen en imagen\tF12", L"Picture in Picture\tF12"),
+              pictureInPicture_);
         entry(menu, IDM_SETTINGS, Tr(language_, L"Configuración...", L"Settings..."));
 
         const UINT selected = TrackPopupMenu(menu,
@@ -2263,6 +2554,10 @@ private:
 
         if (id == IDM_FULLSCREEN) {
             ToggleFullscreen();
+        } else if (id == IDM_PICTURE_IN_PICTURE) {
+            TogglePictureInPicture();
+        } else if (id == IDM_AUTOTUNE) {
+            RunAutoTune();
         } else if (id == IDM_MUTE) {
             audio_.ToggleMute();
             UpdateFpsTitle();
@@ -2273,14 +2568,18 @@ private:
             ComboBox_SetCurSel(syncCombo_, newLowLatency ? 0 : 1);
             WritePrivateProfileStringW(L"capture", L"ultra_low_latency",
                                        newLowLatency ? L"1" : L"0", IniPath().c_str());
+            cadenceWarningShown_ = false;
+            MaybeShowCadenceWarning();
             LogLine(L"Sincronización cambiada en vivo: %s",
                     newLowLatency ? L"VSync OFF / intervalo 0" : L"VSync ON / intervalo 1");
         } else if (id == IDM_EFFECTS_TOGGLE) {
-            ToggleEffects();
+            if (!pictureInPicture_) ToggleEffects();
         } else if (id == IDM_EFFECTS_EDITOR) {
-            OpenEffectsEditor();
+            if (!pictureInPicture_) OpenEffectsEditor();
         } else if (id == IDM_LATENCY_HUD) {
             ToggleLatencyHud();
+        } else if (id == IDM_PACING_SCOPE) {
+            TogglePacingScope();
         } else if (id == IDM_OVERLAY_TOGGLE) {
             ToggleOverlays();
         } else if (id == IDM_OVERLAY_EDITOR) {
@@ -2309,13 +2608,296 @@ private:
         LogLine(L"HUD de latencia aproximada: %s", enabled ? L"activado" : L"desactivado");
     }
 
-    void ReturnToSettings() {
+    void TogglePacingScope() {
+        const bool enabled = !pacingScopeEnabled_.load();
+        pacingScopeEnabled_.store(enabled);
+        WritePrivateProfileStringW(L"capture", L"pacing_scope",
+                                   enabled ? L"1" : L"0", IniPath().c_str());
+        ShowViewerNotice(enabled
+            ? Tr(language_, L"Osciloscopio de frame pacing activado (F9)",
+                            L"Frame pacing scope enabled (F9)")
+            : Tr(language_, L"Osciloscopio de frame pacing desactivado",
+                            L"Frame pacing scope disabled"), 2600);
+        LogLine(L"Frame pacing scope: %s", enabled ? L"activado" : L"desactivado");
+    }
+
+    void ShowViewerNotice(const std::wstring& text, ULONGLONG durationMs = 4500) {
+        auto notice = std::make_shared<ViewerNotice>();
+        notice->text = text;
+        notice->startedAt = GetTickCount64();
+        notice->durationMs = std::max<ULONGLONG>(durationMs, 600);
+        std::atomic_store(&viewerNotice_, std::shared_ptr<const ViewerNotice>(notice));
+    }
+
+    AutoTuneTarget CurrentDisplayTarget() const {
+        AutoTuneTarget target{};
+        MONITORINFOEXW monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            DEVMODEW mode{};
+            mode.dmSize = sizeof(mode);
+            if (EnumDisplaySettingsW(monitor.szDevice, ENUM_CURRENT_SETTINGS, &mode)) {
+                target.width = std::max<DWORD>(640, std::min<DWORD>(mode.dmPelsWidth, 1920));
+                target.height = std::max<DWORD>(480, std::min<DWORD>(mode.dmPelsHeight, 1080));
+                if (mode.dmDisplayFrequency > 1) {
+                    target.refreshHz = NormalizeWindowsRefreshRate(mode.dmDisplayFrequency);
+                }
+            }
+        }
+        return target;
+    }
+
+    void RunAutoTune() {
+        // AutoTune no adivina: puntua TODOS los modos reales del dispositivo,
+        // prefiere formatos ligeros y luego prueba el ganador durante unos
+        // segundos para ver si en la vida real no se anda cayendo a pedazos.
+        const int deviceIndex = running_.load() ? activeDeviceIndex_
+                                                : ComboBox_GetCurSel(videoCombo_);
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(videoDevices_.size())) return;
+        const auto& modes = videoDevices_[deviceIndex].modes;
+        std::vector<ModeCandidate> candidates;
+        candidates.reserve(modes.size());
+        for (const VideoMode& mode : modes) {
+            candidates.push_back({mode.width, mode.height, mode.Fps(), FormatCode(mode.subtype)});
+        }
+        const AutoTuneDecision decision = SelectAutoTuneMode(candidates, CurrentDisplayTarget());
+        if (decision.index < 0 || decision.index >= static_cast<int>(modes.size())) {
+            MessageBoxW(window_, Tr(language_,
+                L"AutoTune no encontró un modo crudo compatible.",
+                L"AutoTune could not find a compatible raw mode."), kAppTitle, MB_ICONWARNING);
+            return;
+        }
+
+        const bool wasRunning = running_.load();
+        const bool wasMuted = audio_.IsMuted();
+        const bool previousLowLatency = activeLowLatency_.load();
+        int previousMode = -1;
+        if (wasRunning) {
+            for (std::size_t i = 0; i < modes.size(); ++i) {
+                if (modes[i].Key() == activeMode_.Key()) previousMode = static_cast<int>(i);
+            }
+            StopCapture();
+        }
+
+        ComboBox_SetCurSel(videoCombo_, deviceIndex);
+        PopulateModeSelectors(deviceIndex, decision.index);
+        ComboBox_SetCurSel(syncCombo_, 0);
+        HRESULT hr = StartCapture();
+        bool restoredPrevious = false;
+        if (FAILED(hr) && wasRunning && previousMode >= 0 && previousMode != decision.index) {
+            LogLine(L"AutoTune: el modo recomendado fallo; restaurando el anterior");
+            PopulateModeSelectors(deviceIndex, previousMode);
+            ComboBox_SetCurSel(syncCombo_, previousLowLatency ? 0 : 1);
+            hr = StartCapture();
+            restoredPrevious = SUCCEEDED(hr);
+        }
+        if (FAILED(hr)) {
+            ShowSetup(true);
+            std::wstring text = std::wstring(Tr(language_,
+                L"AutoTune no pudo iniciar el modo recomendado:\n\n",
+                L"AutoTune could not start the recommended mode:\n\n")) + HrText(hr);
+            MessageBoxW(window_, text.c_str(), kAppTitle, MB_ICONWARNING);
+            return;
+        }
+        if (wasMuted && !audio_.IsMuted()) audio_.ToggleMute();
+        if (restoredPrevious) {
+            ShowViewerNotice(Tr(language_,
+                L"La capturadora rechazó el modo de AutoTune. Se restauró el modo anterior.",
+                L"The capture device rejected the AutoTune mode. The previous mode was restored."),
+                5200);
+            return;
+        }
+
+        autoTuneActive_ = true;
+        autoTuneStartedAt_ = GetTickCount64();
+        autoTuneStartReceived_ = receivedFrames_.load();
+        autoTuneStartDiscarded_ = discardedFrames_.load();
+        autoTuneCandidateCount_ = candidates.size();
+        autoTuneEstimatedMegabytesPerSecond_ = decision.estimatedMegabytesPerSecond;
+        ShowViewerNotice(Tr(language_,
+            L"AutoTune eligió el mejor candidato. Validando estabilidad durante 5 segundos...",
+            L"AutoTune selected the best candidate. Validating stability for 5 seconds..."), 5200);
+        LogLine(L"AutoTune: %zu modos evaluados; candidato %s; USB estimado %.1f MiB/s",
+                candidates.size(), activeMode_.Label().c_str(), decision.estimatedMegabytesPerSecond);
+    }
+
+    void UpdateAutoTune() {
+        // Esta segunda mitad corre despues de la prueba. Mide jitter, frames
+        // recibidos/descartados y tiempo de GPU para dar una calificacion util.
+        if (!autoTuneActive_) return;
+        if (!running_.load()) {
+            autoTuneActive_ = false;
+            return;
+        }
+        const ULONGLONG elapsed = GetTickCount64() - autoTuneStartedAt_;
+        const ULONGLONG received = receivedFrames_.load() - autoTuneStartReceived_;
+        if (elapsed < 5000 || (received < 30 && elapsed < 10000)) return;
+
+        FramePacingSnapshot pacing{};
+        EnterCriticalSection(&frameLock_);
+        pacing = framePacing_.Snapshot();
+        LeaveCriticalSection(&frameLock_);
+        const ULONGLONG discarded = discardedFrames_.load() - autoTuneStartDiscarded_;
+        const double expectedMs = activeMode_.Fps() > 1.0 ? 1000.0 / activeMode_.Fps() : 16.6667;
+        const int score = AutoTuneQualityScore(expectedMs, pacing, received, discarded,
+                                               lastProcessingDurationMs_.load(),
+                                               lastPresentDurationMs_.load());
+        autoTuneActive_ = false;
+
+        wchar_t text[420]{};
+        _snwprintf_s(text, _countof(text), _TRUNCATE,
+            language_ == AppLanguage::English
+                ? L"AutoTune complete: %d/100 · %s\n%zu modes evaluated · jitter %.2f ms · %llu governor drops"
+                : L"AutoTune completado: %d/100 · %s\n%zu modos evaluados · jitter %.2f ms · %llu descartes del governor",
+            score, activeMode_.Label().c_str(), autoTuneCandidateCount_, pacing.jitterMs,
+            governorDiscardedFrames_.load());
+        ShowViewerNotice(text, 6500);
+
+        const std::wstring path = IniPath();
+        const std::wstring scoreText = std::to_wstring(score);
+        wchar_t bandwidth[48]{};
+        _snwprintf_s(bandwidth, _countof(bandwidth), _TRUNCATE, L"%.1f",
+                     autoTuneEstimatedMegabytesPerSecond_);
+        WritePrivateProfileStringW(L"autotune", L"last_score", scoreText.c_str(), path.c_str());
+        WritePrivateProfileStringW(L"autotune", L"last_mode", activeMode_.Key().c_str(), path.c_str());
+        WritePrivateProfileStringW(L"autotune", L"estimated_mib_s", bandwidth, path.c_str());
+        LogLine(L"AutoTune completado: score=%d, recibidos=%llu, descartados=%llu, jitter=%.3f ms",
+                score, received, discarded, pacing.jitterMs);
+    }
+
+    void MaybeShowCadenceWarning() {
+        if (!running_.load() || activeLowLatency_.load()) {
+            cadenceWarningShown_ = false;
+            return;
+        }
+        const double displayHz = CurrentDisplayTarget().refreshHz;
+        const CadenceMismatch mismatch = DetectCadenceMismatch(activeMode_.Fps(), displayHz, true);
+        if (!mismatch.visible || cadenceWarningShown_) return;
+        cadenceWarningShown_ = true;
+        wchar_t text[360]{};
+        _snwprintf_s(text, _countof(text), _TRUNCATE,
+            language_ == AppLanguage::English
+                ? L"Signal %.2f Hz → display %.2f Hz\nVSync may repeat a frame about every %.1f seconds."
+                : L"Señal %.2f Hz → pantalla %.2f Hz\nVSync puede repetir un frame aproximadamente cada %.1f segundos.",
+            activeMode_.Fps(), displayHz, mismatch.repeatEverySeconds);
+        ShowViewerNotice(text, 6800);
+    }
+
+    void ScheduleRecovery(HRESULT reason) {
+        // Phoenix no reinicia todo al primer estornudo. Programa el intento para
+        // que el mensaje llegue a la UI y evita dos recuperaciones simultaneas.
+        if (!running_.load() || recoveryPending_ || recoveryInProgress_) return;
+        if (!PhoenixMayAttemptRecovery(recoveryAttempts_)) {
+            AbandonRecovery(reason);
+            return;
+        }
+        autoTuneActive_ = false;
+        recoveryReason_ = reason;
+        recoveryPending_ = true;
+        recoveryDueTick_ = GetTickCount64() + 350;
+        ShowViewerNotice(Tr(language_,
+            L"La señal se interrumpió. Phoenix está reiniciando la captura...",
+            L"The signal was interrupted. Phoenix is restarting capture..."), 3600);
+        LogLine(L"Phoenix programado: %s", HrText(reason).c_str());
+    }
+
+    void AbandonRecovery(HRESULT reason) {
+        recoveryPending_ = false;
+        recoveryInProgress_ = false;
+        recoveryReason_ = reason;
+        autoTuneActive_ = false;
+        LogLine(L"Phoenix agotó 3 intentos; reinicio seguro a Configuración: %s",
+                HrText(reason).c_str());
+        // Usamos el mismo reinicio seguro del menu Configuracion. Al matar el
+        // proceso viejo nos aseguramos de que WASAPI, Media Foundation, D3D y
+        // el ultimo frame congelado NO se cuelen a la nueva ventana.
+        ReturnToSettings(reason);
+    }
+
+    void AttemptRecovery() {
+        // Conservamos dispositivo, modo y mute; desmontamos la tuberia completa
+        // y la armamos otra vez. Maximo tres intentos para no quedar en bucle.
+        if (!recoveryPending_ || recoveryInProgress_) return;
+        recoveryPending_ = false;
+        recoveryInProgress_ = true;
+        ++recoveryAttempts_;
+        const int deviceIndex = activeDeviceIndex_;
+        int modeIndex = -1;
+        if (deviceIndex >= 0 && deviceIndex < static_cast<int>(videoDevices_.size())) {
+            const auto& modes = videoDevices_[deviceIndex].modes;
+            for (std::size_t i = 0; i < modes.size(); ++i) {
+                if (modes[i].Key() == activeMode_.Key()) modeIndex = static_cast<int>(i);
+            }
+        }
+        const bool wasMuted = audio_.IsMuted();
+        StopCapture();
+        if (deviceIndex >= 0 && modeIndex >= 0) {
+            ComboBox_SetCurSel(videoCombo_, deviceIndex);
+            PopulateModeSelectors(deviceIndex, modeIndex);
+        }
+        const HRESULT hr = StartCapture(true);
+        if (SUCCEEDED(hr)) {
+            if (wasMuted && !audio_.IsMuted()) audio_.ToggleMute();
+            recoveryInProgress_ = false;
+            recoveryReason_ = S_OK;
+            recoveryStableSince_ = GetTickCount64();
+            ShowViewerNotice(Tr(language_,
+                L"Phoenix restauró video y audio correctamente.",
+                L"Phoenix restored video and audio successfully."), 3800);
+            LogLine(L"Phoenix completo en intento %d", recoveryAttempts_);
+            return;
+        }
+
+        recoveryInProgress_ = false;
+        recoveryReason_ = hr;
+        if (PhoenixMayAttemptRecovery(recoveryAttempts_)) {
+            recoveryPending_ = true;
+            recoveryDueTick_ = GetTickCount64() +
+                               static_cast<ULONGLONG>(400 * (1 << recoveryAttempts_));
+            wchar_t retry[180]{};
+            _snwprintf_s(retry, _countof(retry), _TRUNCATE,
+                language_ == AppLanguage::English
+                    ? L"Phoenix retry %d of 3..." : L"Reintento Phoenix %d de 3...",
+                recoveryAttempts_ + 1);
+            ShowViewerNotice(retry, 3000);
+            LogLine(L"Phoenix fallo; reintento pendiente: %s", HrText(hr).c_str());
+            return;
+        }
+
+        AbandonRecovery(hr);
+    }
+
+    void UpdateRecoveryAndHealth() {
+        const ULONGLONG now = GetTickCount64();
+        if (running_.load() && !recoveryPending_ && !recoveryInProgress_) {
+            const ULONGLONG lastFrame = lastFrameArrivalTick_.load();
+            if (lastFrame && now > lastFrame && now - lastFrame > 1800) {
+                ScheduleRecovery(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+            } else if (recoveryAttempts_ > 0 && recoveryStableSince_ &&
+                       now - recoveryStableSince_ > 10000) {
+                recoveryAttempts_ = 0;
+            }
+        }
+        if (recoveryPending_ && now >= recoveryDueTick_) AttemptRecovery();
+    }
+
+    void ReturnToSettings(HRESULT phoenixFailure = S_OK) {
+        // Configuracion se abre en un proceso nuevo y espera a que este termine.
+        // Es mas drastico que esconder el viewer, pero tambien mucho mas limpio:
+        // no deja audio sonando ni el ultimo frame pegado como calcomania.
         FlushEffectsSettings(false);
         FlushOverlaySettings(false);
         wchar_t executable[32768]{};
         if (!GetModuleFileNameW(nullptr, executable, _countof(executable))) return;
         std::wstring command = L"\"" + std::wstring(executable) +
             L"\" --settings --wait-for=" + std::to_wstring(GetCurrentProcessId());
+        if (FAILED(phoenixFailure)) {
+            wchar_t failure[48]{};
+            _snwprintf_s(failure, _countof(failure), _TRUNCATE,
+                         L" --phoenix-failed=0x%08lX",
+                         static_cast<unsigned long>(phoenixFailure));
+            command += failure;
+        }
         std::vector<wchar_t> mutableCommand(command.begin(), command.end());
         mutableCommand.push_back(L'\0');
         STARTUPINFOW startup{};
@@ -2335,9 +2917,14 @@ private:
     }
 
     void PublishEffects(VideoEffects settings) {
+        // La UI conserva lo que eligio la usuaria, pero en PiP publicamos una
+        // copia con efectos apagados. Al salir de PiP reaparece la configuracion
+        // original sin que nadie tenga que acordarse de como estaba.
         settings.Sanitize();
         effectsSettings_ = settings;
-        effectsPacked_.store(settings.Pack(), std::memory_order_relaxed);
+        VideoEffects runtimeSettings = settings;
+        runtimeSettings.enabled = ShouldApplyVisualEffects(settings.enabled, pictureInPicture_);
+        effectsPacked_.store(runtimeSettings.Pack(), std::memory_order_relaxed);
         effectsEditor_.Sync(settings);
         effectsDirty_ = true;
         if (!SetTimer(window_, 4, 350, nullptr)) FlushEffectsSettings();
@@ -2391,6 +2978,8 @@ private:
     }
 
     void PublishOverlayConfig(const OverlayConfig& value) {
+        // Publicamos una foto completa de la configuracion. El render puede
+        // leerla sin agarrar un candado mientras el editor prepara la siguiente.
         auto next = std::make_shared<OverlayConfig>(value);
         std::atomic_store(&overlayConfig_, std::shared_ptr<const OverlayConfig>(next));
         overlaySettingsDirty_ = true;
@@ -2409,6 +2998,7 @@ private:
         OverlayConfig restored{};
         std::wstring error;
         if (!overlay_profile::Load(path, restored, error)) {
+            overlayProfileNeedsBackup_ = true;
             LogLine(L"No se pudo restaurar el overlay: %s", error.c_str());
             MessageBoxW(window_, (std::wstring(Tr(language_,
                         L"No pude restaurar los overlays guardados.\n\n",
@@ -2422,6 +3012,7 @@ private:
         std::atomic_store(&overlayConfig_,
             std::shared_ptr<const OverlayConfig>(std::make_shared<OverlayConfig>(std::move(restored))));
         overlaySettingsDirty_ = false;
+        overlayProfileNeedsBackup_ = false;
         if (!missing.empty()) {
             LogLine(L"Overlays restaurados con imágenes ausentes: %s", missing.c_str());
             MessageBoxW(window_, (std::wstring(Tr(language_,
@@ -2440,7 +3031,17 @@ private:
         if (!config) return;
         const std::wstring path = OverlaySettingsPath();
         std::wstring error;
-        if (overlay_profile::Save(path, *config, error)) {
+        if (overlayProfileNeedsBackup_) {
+            const std::wstring backup = path + L".bad";
+            if (!CopyFileW(path.c_str(), backup.c_str(), FALSE)) {
+                error = L"No se pudo respaldar el perfil inválido como .bad (error " +
+                        std::to_wstring(GetLastError()) + L").";
+            } else {
+                overlayProfileNeedsBackup_ = false;
+                LogLine(L"Perfil de overlays invalido respaldado en %s", backup.c_str());
+            }
+        }
+        if (error.empty() && overlay_profile::Save(path, *config, error)) {
             overlaySettingsDirty_ = false;
             overlaySaveErrorShown_ = false;
         } else {
@@ -2491,11 +3092,72 @@ private:
         return ComboBox_GetCurSel(syncCombo_) != 1;
     }
 
-    HRESULT StartCapture() {
+    static bool IsCaptureDeviceBusy(HRESULT hr) {
+        // Algunos drivers dicen "acceso denegado" mientras terminan de soltar
+        // el pin de video anterior. Compartir la capturadora con otra app sigue
+        // fallando igual; nomas le damos una oportunidad breve al cierre nuestro.
+        return hr == E_ACCESSDENIED ||
+               hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION) ||
+               hr == HRESULT_FROM_WIN32(ERROR_BUSY);
+    }
+
+    HRESULT ActivateVideoSource(int deviceIndex) {
+        // Hay capturadoras que liberan el USB unos milisegundos DESPUES de que
+        // Media Foundation ya dijo que termino. Pasa mucho al cambiar de modo:
+        // sin esta pausita AutoTune se tropieza con su propia puerta cerrada.
+        if (lastCaptureStopTick_ != 0) {
+            constexpr ULONGLONG kRestartGraceMs = 180;
+            const ULONGLONG elapsed = GetTickCount64() - lastCaptureStopTick_;
+            if (elapsed < kRestartGraceMs) {
+                Sleep(static_cast<DWORD>(kRestartGraceMs - elapsed));
+            }
+        }
+
+        constexpr DWORD kBusyRetryDelaysMs[] = {80, 160, 320, 500};
+        HRESULT hr = E_FAIL;
+        for (std::size_t attempt = 0; ; ++attempt) {
+            IMFMediaSource* candidate = nullptr;
+            hr = videoDevices_[deviceIndex].activate->ActivateObject(IID_PPV_ARGS(&candidate));
+            if (SUCCEEDED(hr)) {
+                mediaSource_ = candidate;
+                if (attempt > 0) {
+                    LogLine(L"Capturadora liberada tras %zu reintento(s)", attempt);
+                }
+                return S_OK;
+            }
+
+            // Aunque un driver no deberia devolver objeto cuando falla, mas
+            // vale barrerlo: una referencia colgada aqui nos bloquearia solitos.
+            if (candidate) {
+                candidate->Shutdown();
+                candidate->Release();
+            }
+            if (!IsCaptureDeviceBusy(hr) || attempt >= _countof(kBusyRetryDelaysMs)) {
+                return hr;
+            }
+            const DWORD delay = kBusyRetryDelaysMs[attempt];
+            LogLine(L"Capturadora ocupada al reabrir (%s); reintento %zu en %lu ms",
+                    HrText(hr).c_str(), attempt + 1, delay);
+            Sleep(delay);
+        }
+    }
+
+    HRESULT StartCapture(bool recoveryAttempt = false) {
+        // Esta funcion arma la tuberia completa en orden: renderer -> fuente de
+        // video -> Source Reader -> hilo de render -> audio. Si falla cualquier
+        // pieza, brincamos a `failed` y StopCapture barre todo lo ya creado.
         if (running_.load()) return S_OK;
+        if (!recoveryAttempt) {
+            recoveryPending_ = false;
+            recoveryInProgress_ = false;
+            recoveryAttempts_ = 0;
+        }
         discoSecret_.Reset();
         IMFAttributes* attributes = nullptr;
         IMFMediaType* selectedType = nullptr;
+        IMFSourceReader* newReader = nullptr;
+        std::uint64_t sessionId = 0;
+        const wchar_t* startStage = L"validar seleccion";
         int deviceIndex = ComboBox_GetCurSel(videoCombo_);
         int modeIndex = SelectedModeIndex();
         if (deviceIndex < 0 || deviceIndex >= static_cast<int>(videoDevices_.size())) return E_INVALIDARG;
@@ -2508,6 +3170,7 @@ private:
 
         ShowSetup(false);
         if (GetForegroundWindow() == window_) SetFocus(window_);
+        startStage = L"inicializar renderer";
         renderer_ = new D3DVideoRenderer();
         HRESULT hr = renderer_->Initialize(window_, activeMode_.width, activeMode_.height,
                                            activeMode_.subtype, lowLatency,
@@ -2515,35 +3178,45 @@ private:
         if (FAILED(hr)) {
             delete renderer_;
             renderer_ = nullptr;
-            ShowSetup(true);
+            if (!recoveryAttempt) ShowSetup(true);
             return hr;
         }
-        if (activeDiscoMode_.load()) {
+        if (activeDiscoMode_.load() && !pictureInPicture_) {
             if (renderer_->SupportsDiscoMode()) renderer_->SetDiscoMode(true);
             else activeDiscoMode_.store(false);
         }
 
-        hr = videoDevices_[deviceIndex].activate->ActivateObject(IID_PPV_ARGS(&mediaSource_));
+        sessionId = nextSessionId_.fetch_add(1) + 1;
+        activeSession_.store(sessionId);
+
+        startStage = L"abrir capturadora";
+        hr = ActivateVideoSource(deviceIndex);
         if (FAILED(hr)) goto failed;
 
+        startStage = L"crear atributos del Source Reader";
         hr = MFCreateAttributes(&attributes, 4);
-        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
-        callback_ = new SourceReaderCallback(this);
+        // Le pedimos baja latencia y prohibimos convertidores automaticos. Asi
+        // sabemos exactamente que formato viaja y no aparece una conversion CPU
+        // misteriosa entre la capturadora y nosotros.
+        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(kMfLowLatency, TRUE);
+        callback_ = new SourceReaderCallback(this, sessionId);
         if (SUCCEEDED(hr)) hr = attributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback_);
         if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
-        if (SUCCEEDED(hr)) hr = MFCreateSourceReaderFromMediaSource(mediaSource_, attributes, &reader_);
+        if (SUCCEEDED(hr)) hr = MFCreateSourceReaderFromMediaSource(mediaSource_, attributes, &newReader);
         SafeRelease(attributes);
         if (FAILED(hr)) goto failed;
 
-        hr = reader_->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                         activeMode_.nativeIndex, &selectedType);
+        startStage = L"aplicar modo de video";
+        hr = newReader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                           activeMode_.nativeIndex, &selectedType);
         if (SUCCEEDED(hr)) {
-            hr = reader_->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                              nullptr, selectedType);
+            hr = newReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                                nullptr, selectedType);
         }
         SafeRelease(selectedType);
         if (FAILED(hr)) goto failed;
 
+        startStage = L"crear eventos de captura";
         flushEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         frameReadyEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         resizeEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -2552,16 +3225,24 @@ private:
             hr = HRESULT_FROM_WIN32(GetLastError());
             goto failed;
         }
+        {
+            ExclusiveSrwGuard guard(readerLock_);
+            reader_ = newReader;
+            newReader = nullptr;
+        }
         receivedFrames_ = 0;
         renderedFrames_ = 0;
         discardedFrames_ = 0;
+        governorDiscardedFrames_ = 0;
         receivedFps_ = 0;
         presentedFps_ = 0;
         lastReceivedFpsFrames_ = 0;
         lastPresentedFpsFrames_ = 0;
         lastFrameArrivalTick_.store(GetTickCount64());
+        lastProcessingDurationMs_.store(0.0);
         lastPresentDurationMs_.store(0.0);
         EnterCriticalSection(&frameLock_);
+        framePacing_.Reset();
         framePending_ = false;
         latestFrameArrivalTick_ = lastFrameArrivalTick_.load();
         renderFrameArrivalTick_ = latestFrameArrivalTick_;
@@ -2569,6 +3250,9 @@ private:
         renderFrameStride_ = 0;
         LeaveCriticalSection(&frameLock_);
         running_.store(true);
+        cadenceWarningShown_ = false;
+        recoveryStableSince_ = GetTickCount64();
+        startStage = L"crear hilo de render";
         renderThread_ = CreateThread(nullptr, 0, RenderThreadEntry, this, 0, nullptr);
         if (!renderThread_) {
             hr = HRESULT_FROM_WIN32(GetLastError());
@@ -2587,29 +3271,54 @@ private:
 
         LogLine(L"Captura iniciada: %s, %s",
                 videoDevices_[deviceIndex].name.c_str(), activeMode_.Label().c_str());
-        hr = reader_->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
-                                 nullptr, nullptr, nullptr, nullptr);
+        startStage = L"pedir primer frame";
+        hr = ContinueReading(sessionId);
         if (FAILED(hr)) goto failed;
         MarkFirstRunComplete();
         return S_OK;
 
     failed:
-        LogLine(L"Fallo al iniciar: %s", HrText(hr).c_str());
+        SafeRelease(newReader);
+        LogLine(L"Fallo al iniciar en '%s': %s", startStage, HrText(hr).c_str());
         StopCapture();
-        ShowSetup(true);
+        if (!recoveryAttempt) ShowSetup(true);
         return hr;
     }
 
     void StopCapture() {
+        // El orden importa: paramos audio, pedimos flush al Source Reader,
+        // detenemos el hilo y AL FINAL soltamos D3D/dispositivos. Hacerlo al
+        // reves es una receta muy sabrosa para accesos a memoria ya liberada.
         discoSecret_.Reset();
-        if (!running_.exchange(false) && !reader_ && !renderer_ && !renderThread_) return;
-        audio_.Stop();
-        if (reader_) {
-            if (flushEvent_) ResetEvent(flushEvent_);
-            reader_->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
-            if (flushEvent_) WaitForSingleObject(flushEvent_, 500);
+        const bool wasRunning = running_.exchange(false);
+        IMFSourceReader* readerToStop = nullptr;
+        {
+            // Quitamos el reader visible primero. Cualquier callback que llegue
+            // tarde ya no puede pedir otro sample ni brincar al reader nuevo.
+            ExclusiveSrwGuard guard(readerLock_);
+            readerToStop = reader_;
+            reader_ = nullptr;
         }
-        SafeRelease(reader_);
+        if (!wasRunning && !readerToStop && !renderer_ && !renderThread_ &&
+            !callback_ && !mediaSource_ && !flushEvent_) {
+            activeSession_.store(0);
+            return;
+        }
+        audio_.Stop();
+        if (readerToStop) {
+            if (flushEvent_) ResetEvent(flushEvent_);
+            const HRESULT flushHr = readerToStop->Flush(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
+            if (SUCCEEDED(flushHr) && flushEvent_) {
+                const DWORD wait = WaitForSingleObject(flushEvent_, 500);
+                if (wait != WAIT_OBJECT_0) LogLine(L"Source Reader: timeout esperando OnFlush");
+            } else if (FAILED(flushHr)) {
+                LogLine(L"Source Reader: Flush fallo: %s", HrText(flushHr).c_str());
+            }
+        }
+        // Va DESPUES de OnFlush: si lo hicieramos antes, el callback ya no
+        // podria prender flushEvent_ y siempre nos comeriamos el timeout.
+        if (callback_) callback_->Detach();
+        SafeRelease(readerToStop);
         if (renderStopEvent_) SetEvent(renderStopEvent_);
         if (renderThread_) {
             WaitForSingleObject(renderThread_, INFINITE);
@@ -2628,13 +3337,26 @@ private:
             CloseHandle(renderStopEvent_);
             renderStopEvent_ = nullptr;
         }
+        // Release del Source Reader suele apagar la fuente, pero lo hacemos
+        // explicito tambien. Luego ShutdownObject borra las referencias internas
+        // del IMFActivate para que el siguiente ActivateObject cree una limpia.
+        if (mediaSource_) {
+            const HRESULT sourceShutdownHr = mediaSource_->Shutdown();
+            if (FAILED(sourceShutdownHr) && sourceShutdownHr != MF_E_SHUTDOWN) {
+                LogLine(L"Media Source: Shutdown fallo: %s", HrText(sourceShutdownHr).c_str());
+            }
+        }
         if (activeDeviceIndex_ >= 0 && activeDeviceIndex_ < static_cast<int>(videoDevices_.size())) {
-            videoDevices_[activeDeviceIndex_].activate->ShutdownObject();
-        } else if (mediaSource_) {
-            mediaSource_->Shutdown();
+            const HRESULT activateShutdownHr =
+                videoDevices_[activeDeviceIndex_].activate->ShutdownObject();
+            if (FAILED(activateShutdownHr) && activateShutdownHr != MF_E_SHUTDOWN) {
+                LogLine(L"IMFActivate: ShutdownObject fallo: %s",
+                        HrText(activateShutdownHr).c_str());
+            }
         }
         SafeRelease(mediaSource_);
         activeDeviceIndex_ = -1;
+        activeSession_.store(0);
         if (callback_) {
             callback_->Release();
             callback_ = nullptr;
@@ -2651,7 +3373,13 @@ private:
         renderFrame_.clear();
         framePending_ = false;
         LeaveCriticalSection(&frameLock_);
+        {
+            ExclusiveSrwGuard guard(sampleLock_);
+            captureFrame_.clear();
+            captureI420Native_.clear();
+        }
         SetWindowTextW(window_, kAppTitle);
+        lastCaptureStopTick_ = GetTickCount64();
         LogLine(L"Captura detenida");
     }
 
@@ -2660,10 +3388,13 @@ private:
     }
 
     DWORD RenderLoop() {
+        // Este hilo solo despierta por tres cosas: cerrar, resize o frame nuevo.
+        // El timeout de 16 ms existe para animar avisos aunque la señal se quede
+        // quieta; si no hay animacion, vuelve a dormir.
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
         HANDLE events[] = {renderStopEvent_, resizeEvent_, frameReadyEvent_};
         for (;;) {
-            const DWORD wait = WaitForMultipleObjects(_countof(events), events, FALSE, INFINITE);
+            const DWORD wait = WaitForMultipleObjects(_countof(events), events, FALSE, 16);
             if (wait == WAIT_OBJECT_0) break;
             if (wait == WAIT_OBJECT_0 + 1) {
                 const UINT width = pendingWidth_.load();
@@ -2674,20 +3405,48 @@ private:
                 }
                 continue;
             }
-            if (wait != WAIT_OBJECT_0 + 2) {
+            bool animationRedraw = false;
+            if (wait == WAIT_TIMEOUT) {
+                const auto notice = std::atomic_load(&viewerNotice_);
+                const ULONGLONG now = GetTickCount64();
+                animationRedraw = notice && now >= notice->startedAt &&
+                                  now - notice->startedAt < notice->durationMs &&
+                                  !renderFrame_.empty();
+                if (!animationRedraw) continue;
+            } else if (wait != WAIT_OBJECT_0 + 2) {
                 LogLine(L"Hilo de render detenido por WaitForMultipleObjects: %lu", wait);
                 break;
             }
 
-            bool haveFrame = false;
+            bool haveFrame = animationRedraw;
+            bool newFrame = false;
+            FramePacingSnapshot pacing{};
+            std::uint32_t queueDepth = 0;
             EnterCriticalSection(&frameLock_);
-            if (framePending_) {
+            if (!animationRedraw && framePending_) {
                 latestFrame_.swap(renderFrame_);
                 renderFrameArrivalTick_ = latestFrameArrivalTick_;
                 renderFrameStride_ = latestFrameStride_;
                 framePending_ = false;
                 haveFrame = true;
+                newFrame = true;
             }
+            LeaveCriticalSection(&frameLock_);
+
+            EnterCriticalSection(&frameLock_);
+            // Latency Governor: si llego otro frame antes de empezar la GPU,
+            // mandamos el anterior alv con cariño y usamos el nuevo. Mostrar un
+            // frame ya viejo solo subiria la latencia por ser "completistas".
+            if (newFrame && framePending_) {
+                latestFrame_.swap(renderFrame_);
+                renderFrameArrivalTick_ = latestFrameArrivalTick_;
+                renderFrameStride_ = latestFrameStride_;
+                framePending_ = false;
+                discardedFrames_++;
+                governorDiscardedFrames_++;
+            }
+            pacing = framePacing_.Snapshot();
+            queueDepth = framePending_ ? 1u : 0u;
             LeaveCriticalSection(&frameLock_);
             if (!haveFrame || !renderer_ || renderFrame_.empty() || IsIconic(window_)) continue;
 
@@ -2703,18 +3462,39 @@ private:
             stats.sourceFps = activeMode_.Fps();
             stats.format = GuidFormatName(activeMode_.subtype);
             stats.lowLatency = activeLowLatency_.load();
+            stats.processingMs = lastProcessingDurationMs_.load();
+            stats.presentMs = lastPresentDurationMs_.load();
+            stats.frameIntervalMs = pacing.averageMs;
+            stats.frameJitterMs = pacing.jitterMs;
+            stats.frameMinimumMs = pacing.minimumMs;
+            stats.frameMaximumMs = pacing.maximumMs;
+            stats.frameIntervalsMs = pacing.intervalsMs;
+            stats.frameIntervalCount = pacing.count;
+            stats.queueDepth = queueDepth;
+            stats.governorDiscardedFrames = governorDiscardedFrames_.load();
+            stats.pacingScope = pacingScopeEnabled_.load();
             stats.approximateLatencyMs = EstimateViewerLatencyMs(
                 stats.sourceFps, stats.lastFrameAgeMs,
                 lastPresentDurationMs_.load(), stats.lowLatency);
             stats.english = language_ == AppLanguage::English;
-            double presentDurationMs = 0.0;
+            const auto notice = std::atomic_load(&viewerNotice_);
+            if (notice) {
+                const ULONGLONG now = GetTickCount64();
+                if (now >= notice->startedAt && now - notice->startedAt < notice->durationMs) {
+                    stats.noticeText = notice->text;
+                    stats.noticeAgeMs = now - notice->startedAt;
+                    stats.noticeDurationMs = notice->durationMs;
+                }
+            }
+            RenderTiming timing{};
             const HRESULT hr = renderer_->Render(renderFrame_.data(), renderFrame_.size(), renderFrameStride_,
                                                  std::atomic_load(&overlayConfig_), stats,
                                                  VideoEffects::Unpack(effectsPacked_.load(std::memory_order_relaxed)),
-                                                 latencyHudEnabled_.load(), &presentDurationMs);
+                                                 latencyHudEnabled_.load(), &timing);
             if (SUCCEEDED(hr)) {
-                lastPresentDurationMs_.store(presentDurationMs);
-                renderedFrames_++;
+                lastProcessingDurationMs_.store(timing.processingMs);
+                lastPresentDurationMs_.store(timing.presentMs);
+                if (newFrame) renderedFrames_++;
             }
             else if (hr != DXGI_STATUS_OCCLUDED) {
                 LogLine(L"Present fallo: %s", HrText(hr).c_str());
@@ -2724,9 +3504,10 @@ private:
     }
 
     void ShowSetup(bool show) {
+        if (show && pictureInPicture_) ExitPictureInPicture(false);
         capturingUi_ = !show;
         HWND controls[] = {videoCombo_, resolutionCombo_, fpsCombo_, formatCombo_, formatNotice_,
-                           audioCombo_, gainCombo_, syncCombo_, languageCombo_, startButton_,
+                           audioCombo_, gainCombo_, syncCombo_, languageCombo_, autoTuneButton_, startButton_,
                            statusText_, kofiLink_, githubLink_};
         for (HWND control : controls) ShowWindow(control, show ? SW_SHOW : SW_HIDE);
         if (show) {
@@ -2752,8 +3533,8 @@ private:
         wchar_t title[240]{};
         _snwprintf_s(title, _countof(title), _TRUNCATE,
                      language_ == AppLanguage::English
-                        ? L"Dayaah Capture 2.0.1  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s"
-                        : L"Dayaah Capture 2.0.1  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s",
+                        ? L"Dayaah Capture 2.2.0  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s"
+                        : L"Dayaah Capture 2.2.0  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s",
                      presented, activeMode_.width, activeMode_.height, activeMode_.Fps(),
                      GuidFormatName(activeMode_.subtype).c_str(),
                      audio_.IsMuted() ? L"MUTE" : L"ON",
@@ -2812,7 +3593,10 @@ private:
     }
 
     void ToggleFullscreen() {
+        // Pantalla completa real sin bordes. Guardamos estilo y posicion para
+        // devolver la ventana exactamente a donde estaba.
         if (!running_.load() && !fullscreen_) return;
+        if (pictureInPicture_) ExitPictureInPicture(false);
         if (!fullscreen_) {
             SetCaptureCursorHidden(false);
             windowStyle_ = GetWindowLongPtrW(window_, GWL_STYLE);
@@ -2836,6 +3620,130 @@ private:
             fullscreen_ = false;
             lastMouseMove_ = GetTickCount64();
         }
+    }
+
+    void SavePictureInPictureBounds() {
+        if (!pictureInPicture_ || !window_ || IsIconic(window_)) return;
+        RECT rect{};
+        if (!GetWindowRect(window_, &rect)) return;
+        const std::wstring path = IniPath();
+        const auto writeNumber = [&](const wchar_t* key, long value) {
+            const std::wstring text = std::to_wstring(value);
+            WritePrivateProfileStringW(L"picture_in_picture", key, text.c_str(), path.c_str());
+        };
+        writeNumber(L"left", rect.left);
+        writeNumber(L"top", rect.top);
+        writeNumber(L"width", rect.right - rect.left);
+        writeNumber(L"height", rect.bottom - rect.top);
+    }
+
+    void EnterPictureInPicture() {
+        // PiP reutiliza la MISMA captura; solo cambia la ropa de la ventana.
+        // Pausamos shaders creativos y modo disco porque en una ventanita nomas
+        // gastarian GPU, pero overlays, audio y telemetria siguen vivos.
+        if (pictureInPicture_ || !running_.load()) return;
+        if (fullscreen_) ToggleFullscreen();
+
+        effectsEditor_.Close();
+        FlushEffectsSettings(false);
+        SetCaptureCursorHidden(false);
+        pictureInPictureStyle_ = GetWindowLongPtrW(window_, GWL_STYLE);
+        pictureInPictureExStyle_ = GetWindowLongPtrW(window_, GWL_EXSTYLE);
+        pictureInPicturePlacement_.length = sizeof(pictureInPicturePlacement_);
+        GetWindowPlacement(window_, &pictureInPicturePlacement_);
+
+        constexpr LONG_PTR pipStyle = static_cast<LONG_PTR>(WS_POPUP | WS_THICKFRAME | WS_VISIBLE);
+        const LONG_PTR pipExStyle =
+            (pictureInPictureExStyle_ | static_cast<LONG_PTR>(WS_EX_TOPMOST | WS_EX_TOOLWINDOW)) &
+            ~static_cast<LONG_PTR>(WS_EX_APPWINDOW);
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor);
+
+        RECT defaultRect{0, 0, 480, 270};
+        AdjustWindowRectEx(&defaultRect, static_cast<DWORD>(pipStyle), FALSE,
+                           static_cast<DWORD>(pipExStyle));
+        const long defaultWidth = defaultRect.right - defaultRect.left;
+        const long defaultHeight = defaultRect.bottom - defaultRect.top;
+        const long fallbackLeft = monitor.rcWork.right - defaultWidth - 24;
+        const long fallbackTop = monitor.rcWork.top + 24;
+        const auto readPipNumber = [&](const wchar_t* key, long fallback) {
+            wchar_t fallbackText[32]{};
+            wchar_t value[32]{};
+            _snwprintf_s(fallbackText, _countof(fallbackText), _TRUNCATE, L"%ld", fallback);
+            GetPrivateProfileStringW(L"picture_in_picture", key, fallbackText,
+                                     value, _countof(value), IniPath().c_str());
+            wchar_t* end = nullptr;
+            const long parsed = wcstol(value, &end, 10);
+            return end != value ? parsed : fallback;
+        };
+        PictureInPictureBounds requested{
+            readPipNumber(L"left", fallbackLeft),
+            readPipNumber(L"top", fallbackTop), 0, 0};
+        requested.right = requested.left + readPipNumber(L"width", defaultWidth);
+        requested.bottom = requested.top + readPipNumber(L"height", defaultHeight);
+        const PictureInPictureBounds work{
+            monitor.rcWork.left, monitor.rcWork.top, monitor.rcWork.right, monitor.rcWork.bottom};
+        const PictureInPictureBounds bounds = ClampPictureInPictureBounds(
+            requested, work, 320, 180);
+
+        pictureInPicture_ = true;
+        VideoEffects runtimeEffects = effectsSettings_;
+        runtimeEffects.enabled = ShouldApplyVisualEffects(effectsSettings_.enabled, pictureInPicture_);
+        effectsPacked_.store(runtimeEffects.Pack(), std::memory_order_relaxed);
+        if (renderer_ && activeDiscoMode_.load()) renderer_->SetDiscoMode(false);
+
+        SetWindowLongPtrW(window_, GWL_STYLE, pipStyle);
+        SetWindowLongPtrW(window_, GWL_EXSTYLE, pipExStyle);
+        ShowWindow(window_, SW_RESTORE);
+        SetWindowPos(window_, HWND_TOPMOST, bounds.left, bounds.top,
+                     bounds.right - bounds.left, bounds.bottom - bounds.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+        ShowViewerNotice(Tr(language_,
+            L"PiP activo · efectos pausados · F12 para salir",
+            L"PiP active · effects paused · F12 to exit"), 3800);
+        LogLine(L"PiP activado; efectos visuales pausados");
+    }
+
+    void ExitPictureInPicture(bool showNotice = true) {
+        // Restauramos estilo, posicion, z-order y efectos que estaban activos.
+        // Nada se pierde: PiP es una pausa visual, no otra configuracion.
+        if (!pictureInPicture_) return;
+        SavePictureInPictureBounds();
+        SetCaptureCursorHidden(false);
+        pictureInPicture_ = false;
+
+        SetWindowLongPtrW(window_, GWL_STYLE, pictureInPictureStyle_);
+        SetWindowLongPtrW(window_, GWL_EXSTYLE, pictureInPictureExStyle_);
+        SetWindowPlacement(window_, &pictureInPicturePlacement_);
+        const HWND zOrder = (pictureInPictureExStyle_ & WS_EX_TOPMOST)
+            ? HWND_TOPMOST : HWND_NOTOPMOST;
+        SetWindowPos(window_, zOrder, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                     SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
+
+        effectsPacked_.store(effectsSettings_.Pack(), std::memory_order_relaxed);
+        if (renderer_ && activeDiscoMode_.load() && renderer_->SupportsDiscoMode()) {
+            renderer_->SetDiscoMode(true);
+        }
+        UpdateFpsTitle();
+        lastMouseMove_ = GetTickCount64();
+        hasLastCursorPosition_ = false;
+        if (showNotice) {
+            ShowViewerNotice(Tr(language_,
+                effectsSettings_.enabled
+                    ? L"PiP cerrado · efectos restaurados"
+                    : L"PiP cerrado",
+                effectsSettings_.enabled
+                    ? L"PiP closed · effects restored"
+                    : L"PiP closed"), 3000);
+        }
+        LogLine(L"PiP desactivado; estado de efectos restaurado");
+    }
+
+    void TogglePictureInPicture() {
+        if (pictureInPicture_) ExitPictureInPicture();
+        else EnterPictureInPicture();
     }
 
     void ReleaseDevices() {
@@ -2862,6 +3770,9 @@ private:
     }
 
     void MarkFirstRunComplete() {
+        // Solo marcamos el primer arranque como completado DESPUES de iniciar
+        // una captura buena. Si algo fallo, Configuracion vuelve a salir en el
+        // siguiente intento en vez de aventar al usuario al vacio.
         if (!firstRun_) return;
         const std::wstring path = IniPath();
         const bool deviceSaved = WritePrivateProfileStringW(
@@ -2896,6 +3807,7 @@ private:
                                    path.c_str());
     }
 
+    // ----- Ventana y controles de Configuracion -----
     HINSTANCE instance_ = nullptr;
     HWND window_ = nullptr;
     HWND videoCombo_ = nullptr;
@@ -2907,6 +3819,7 @@ private:
     HWND gainCombo_ = nullptr;
     HWND syncCombo_ = nullptr;
     HWND languageCombo_ = nullptr;
+    HWND autoTuneButton_ = nullptr;
     HWND startButton_ = nullptr;
     HWND statusText_ = nullptr;
     HWND kofiLink_ = nullptr;
@@ -2916,6 +3829,7 @@ private:
     HBRUSH controlBrush_ = nullptr;
     HCURSOR visibleCursor_ = nullptr;
     HCURSOR hiddenCursor_ = nullptr;
+    // ----- Dispositivos elegidos y objetos de captura -----
     IMMDeviceEnumerator* audioEnumerator_ = nullptr;
     std::vector<VideoDeviceInfo> videoDevices_;
     std::vector<AudioDeviceInfo> audioDevices_;
@@ -2930,12 +3844,22 @@ private:
     D3DVideoRenderer* renderer_ = nullptr;
     AudioBridge audio_;
     IMFMediaSource* mediaSource_ = nullptr;
+    SRWLOCK readerLock_ = SRWLOCK_INIT;
     IMFSourceReader* reader_ = nullptr;
     SourceReaderCallback* callback_ = nullptr;
     HANDLE flushEvent_ = nullptr;
+    std::atomic<std::uint64_t> nextSessionId_{0};
+    std::atomic<std::uint64_t> activeSession_{0};
+    ULONGLONG lastCaptureStopTick_ = 0;
+    // ----- Buzon de frames entre Media Foundation y el hilo de render -----
+    // Solo caben el frame mas reciente y el que se esta pintando. Ese limite
+    // pequeño es completamente a proposito.
     std::atomic<bool> running_{false};
     std::atomic<HRESULT> captureError_{S_OK};
+    SRWLOCK sampleLock_ = SRWLOCK_INIT;
     CRITICAL_SECTION frameLock_{};
+    std::vector<BYTE> captureFrame_;
+    std::vector<BYTE> captureI420Native_;
     std::vector<BYTE> latestFrame_;
     std::vector<BYTE> renderFrame_;
     bool framePending_ = false;
@@ -2945,6 +3869,7 @@ private:
     HANDLE renderThread_ = nullptr;
     std::atomic<UINT> pendingWidth_{0};
     std::atomic<UINT> pendingHeight_{0};
+    // ----- Telemetria y Latency Governor -----
     std::atomic<ULONGLONG> receivedFrames_{0};
     std::atomic<ULONGLONG> renderedFrames_{0};
     std::atomic<ULONGLONG> discardedFrames_{0};
@@ -2955,14 +3880,34 @@ private:
     ULONGLONG renderFrameArrivalTick_ = 0;
     LONG latestFrameStride_ = 0;
     LONG renderFrameStride_ = 0;
+    FramePacingTracker framePacing_;
+    std::atomic<ULONGLONG> governorDiscardedFrames_{0};
+    std::atomic<double> lastProcessingDurationMs_{0.0};
     std::atomic<double> lastPresentDurationMs_{0.0};
     std::atomic<bool> activeLowLatency_{true};
     std::atomic<bool> activeInputFullRange_{false};
     std::atomic<bool> activeDiscoMode_{false};
     std::atomic<bool> latencyHudEnabled_{false};
+    std::atomic<bool> pacingScopeEnabled_{false};
+    std::shared_ptr<const ViewerNotice> viewerNotice_;
+    bool autoTuneActive_ = false;
+    ULONGLONG autoTuneStartedAt_ = 0;
+    ULONGLONG autoTuneStartReceived_ = 0;
+    ULONGLONG autoTuneStartDiscarded_ = 0;
+    std::size_t autoTuneCandidateCount_ = 0;
+    double autoTuneEstimatedMegabytesPerSecond_ = 0.0;
+    bool cadenceWarningShown_ = false;
+    // ----- Phoenix Recovery -----
+    bool recoveryPending_ = false;
+    bool recoveryInProgress_ = false;
+    int recoveryAttempts_ = 0;
+    ULONGLONG recoveryDueTick_ = 0;
+    ULONGLONG recoveryStableSince_ = 0;
+    HRESULT recoveryReason_ = S_OK;
     DiscoSecret discoSecret_;
     ULONGLONG lastReceivedFpsFrames_ = 0;
     ULONGLONG lastPresentedFpsFrames_ = 0;
+    // ----- Overlays y efectos publicados sin frenar al render -----
     std::shared_ptr<const OverlayConfig> overlayConfig_;
     OverlayEditor overlayEditor_;
     VideoEffects effectsSettings_;
@@ -2972,6 +3917,8 @@ private:
     bool effectsSaveErrorShown_ = false;
     bool overlaySettingsDirty_ = false;
     bool overlaySaveErrorShown_ = false;
+    bool overlayProfileNeedsBackup_ = false;
+    // ----- Comportamiento de ventana, cursor, fullscreen y PiP -----
     ULONGLONG lastMouseMove_ = 0;
     POINT lastCursorPosition_{};
     bool hasLastCursorPosition_ = false;
@@ -2980,8 +3927,12 @@ private:
     bool menuOpen_ = false;
     bool capturingUi_ = false;
     bool fullscreen_ = false;
+    bool pictureInPicture_ = false;
     LONG_PTR windowStyle_ = 0;
     WINDOWPLACEMENT windowPlacement_{};
+    LONG_PTR pictureInPictureStyle_ = 0;
+    LONG_PTR pictureInPictureExStyle_ = 0;
+    WINDOWPLACEMENT pictureInPicturePlacement_{};
     AppLanguage language_ = AppLanguage::Spanish;
     std::wstring deviceFingerprint_;
     bool firstRun_ = true;
@@ -2999,28 +3950,49 @@ STDMETHODIMP SourceReaderCallback::QueryInterface(REFIID iid, void** object) {
 }
 
 STDMETHODIMP SourceReaderCallback::OnReadSample(HRESULT status, DWORD, DWORD streamFlags,
-                                                 LONGLONG, IMFSample* sample) {
+                                                 LONGLONG timestamp, IMFSample* sample) {
+    SharedSrwGuard guard(appLock_);
+    DayaahApp* app = app_;
+    if (!app || !app->IsActiveSession(sessionId_)) return S_OK;
+    // Un cambio de formato a media captura puede cambiar tamaño/stride sin
+    // avisarle al renderer. Lo tratamos como perdida de señal para que Phoenix
+    // reconstruya todo de forma segura.
     if (FAILED(status)) {
-        app_->ReaderError(status);
+        app->ReaderError(sessionId_, status);
         return S_OK;
     }
     if (streamFlags & MF_SOURCE_READERF_ERROR) {
-        app_->ReaderError(E_FAIL);
+        app->ReaderError(sessionId_, E_FAIL);
         return S_OK;
     }
-    if (sample) app_->OnVideoSample(sample);
-    app_->ContinueReading();
+    if (streamFlags & (MF_SOURCE_READERF_ENDOFSTREAM |
+                       MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED |
+                       MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) {
+        app->ReaderError(sessionId_, MF_E_TRANSFORM_STREAM_CHANGE);
+        return S_OK;
+    }
+    if (sample) app->OnVideoSample(sessionId_, sample, timestamp);
+    const HRESULT readHr = app->ContinueReading(sessionId_);
+    if (FAILED(readHr) && readHr != MF_E_NOTACCEPTING && readHr != MF_E_SHUTDOWN) {
+        app->ReaderError(sessionId_, readHr);
+    }
     return S_OK;
 }
 
 STDMETHODIMP SourceReaderCallback::OnFlush(DWORD) {
-    app_->ReaderFlushed();
+    SharedSrwGuard guard(appLock_);
+    if (app_) app_->ReaderFlushed(sessionId_);
     return S_OK;
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+    // Los argumentos especiales los usa el reinicio seguro: el proceso nuevo
+    // espera al anterior antes de abrir Configuracion. Asi nunca quedan dos
+    // procesos peleandose por la misma capturadora.
     bool forceSettings = false;
     DWORD waitForProcess = 0;
+    HRESULT phoenixFailure = S_OK;
+    bool phoenixFailureProvided = false;
     int argumentCount = 0;
     LPWSTR* arguments = CommandLineToArgvW(GetCommandLineW(), &argumentCount);
     if (arguments) {
@@ -3029,6 +4001,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (argument == L"--settings") forceSettings = true;
             else if (argument.rfind(L"--wait-for=", 0) == 0) {
                 waitForProcess = static_cast<DWORD>(wcstoul(argument.c_str() + 11, nullptr, 10));
+            } else if (argument.rfind(L"--phoenix-failed=", 0) == 0) {
+                phoenixFailure = static_cast<HRESULT>(wcstoul(argument.c_str() + 17, nullptr, 0));
+                phoenixFailureProvided = true;
             }
         }
         LocalFree(arguments);
@@ -3041,11 +4016,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
     }
     std::wstring logPath = JoinPath(ModuleDirectory(), L"DayaahCapture.log");
-    DeleteFileW(logPath.c_str());
-    LogLine(L"Dayaah Capture 2.0.1 iniciando");
+    if (!waitForProcess) {
+        // Arranque normal: el log anterior sigue disponible como .log.1. Si la
+        // rotacion falla, preferimos conservarlo y añadir al final antes que
+        // borrar justo la evidencia que alguien iba a mandar en un Issue.
+        const std::wstring previousLog = JoinPath(ModuleDirectory(), L"DayaahCapture.log.1");
+        if (GetFileAttributesW(logPath.c_str()) != INVALID_FILE_ATTRIBUTES &&
+            !MoveFileExW(logPath.c_str(), previousLog.c_str(),
+                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            LogLine(L"No se pudo rotar el log anterior (error %lu)", GetLastError());
+        }
+    } else {
+        LogLine(L"---------------- reinicio interno ----------------");
+        LogLine(L"Esperando al proceso anterior: PID %lu", waitForProcess);
+    }
+    LogLine(L"Dayaah Capture 2.2.0 iniciando");
+    if (phoenixFailureProvided) {
+        LogLine(L"Motivo del reinicio Phoenix: --phoenix-failed=0x%08lX",
+                static_cast<unsigned long>(phoenixFailure));
+    }
 
     DayaahApp app;
-    HRESULT hr = app.Initialize(instance, forceSettings);
+    HRESULT hr = app.Initialize(instance, forceSettings, phoenixFailure);
     if (FAILED(hr)) {
         std::wstring text = L"Dayaah Capture no pudo iniciar:\n\n" + HrText(hr) +
             L"\n\nAbre un Issue en GitHub y adjunta DayaahCapture.log:\n"

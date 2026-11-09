@@ -14,6 +14,9 @@ struct ModeCandidate {
 
 enum class ModeAxis { Resolution, Fps, Format };
 
+// Cuando se cambia UNA cosa desde el menu contextual intentamos conservar las
+// otras dos. Ejemplo: si pides 120 fps, preferimos tu misma resolucion/formato
+// antes de brincar a una combinacion random que el driver anuncio primero.
 inline int SelectClosestMode(const std::vector<ModeCandidate>& modes,
                              const ModeCandidate& current,
                              const ModeCandidate& requested,

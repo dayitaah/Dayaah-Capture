@@ -3,6 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 
+// Easter egg humilde: escribir DISCO dentro del viewer activa el modo RGB.
+// Si tardas mas de tres segundos entre letras empezamos otra vez, porque esto
+// es una clave secreta, no una tesis jajaja.
 class DiscoSecret {
 public:
     bool Input(wchar_t character, std::uint64_t tickMs) {

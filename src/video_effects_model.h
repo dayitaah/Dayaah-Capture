@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cstdint>
 
+// Todos los controles del editor terminan aqui. Los valores "neutros" son 100
+// para color/gamma y 0 para cosas que se suman como nitidez o curvatura.
 struct VideoEffects {
     bool enabled = false;
     bool sharpenEnabled = true;
@@ -31,7 +33,9 @@ struct VideoEffects {
             (colorEnabled && (contrast != 100 || saturation != 100 || gamma != 100 || temperature != 0)) ||
             (crtEnabled && (scanlines != 0 || mask != 0 || curvature != 0)));
     }
-    // One atomic publication: no partial configurations, allocations or locks.
+    // Empacamos todo en 64 bits para publicarlo de un jalon. El hilo de render
+    // nunca ve mitad de la configuracion vieja y mitad de la nueva, ni necesita
+    // candados mientras esta pintando.
     std::uint64_t Pack() const {
         VideoEffects s = *this;
         s.Sanitize();

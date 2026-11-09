@@ -7,6 +7,8 @@
 #include "video_effects_model.h"
 
 namespace video_effects_settings {
+// El INI es aburrido pero transparente: se puede respaldar, editar o borrar y
+// la app vuelve a valores sanos sin depender del registro de Windows.
 inline constexpr const wchar_t* kSection = L"video_effects_v1";
 inline constexpr const wchar_t* kKeys[] = {L"sharpness", L"contrast", L"saturation", L"gamma",
     L"temperature", L"scanlines", L"mask", L"curvature"};
@@ -17,6 +19,8 @@ inline constexpr const wchar_t* kFlagKeys[] = {L"enabled", L"sharpen_enabled", L
 inline constexpr bool VideoEffects::*kFlags[] = {&VideoEffects::enabled, &VideoEffects::sharpenEnabled,
     &VideoEffects::colorEnabled, &VideoEffects::crtEnabled};
 inline int ReadInt(const std::wstring& path, const wchar_t* key, int fallback) {
+    // wcstol con validacion completa: si alguien escribe "mucho" en vez de 100,
+    // usamos el valor seguro y seguimos con nuestra vida.
     wchar_t text[32]{};
     const DWORD count = GetPrivateProfileStringW(kSection, key, L"", text, 32, path.c_str());
     if (!count || count >= 31) return fallback;
@@ -34,6 +38,7 @@ inline VideoEffects Load(const std::wstring& path) {
     return s;
 }
 inline bool Save(const std::wstring& path, VideoEffects s) {
+    // Escribimos la seccion completa para no dejar llaves viejas dando vueltas.
     s.Sanitize();
     std::wstring section;
     auto append = [&](const wchar_t* key, int value) {

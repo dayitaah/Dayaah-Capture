@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Ruta vieja para toolchains GCC-MinGW. La reproducible de v2.2.0 es
+# build-llvm-mingw.sh, pero dejamos esta por compatibilidad con builds anteriores.
 dayaah_mingw_root="${1:?Usage: bash build-mingw.sh /absolute/path/to/toolchain-mingw}"
 dayaah_src_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 dayaah_bin="$dayaah_mingw_root/usr/bin"

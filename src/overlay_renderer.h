@@ -10,7 +10,10 @@
 #include <string>
 
 #include "overlay_model.h"
+#include "performance_telemetry.h"
 
+// Direct2D pinta encima del back buffer que ya preparo D3D11. Asi texto, PNG,
+// mira y HUD viajan en el mismo Present y no necesitamos otra ventana flotante.
 class OverlayRenderer {
 public:
     ~OverlayRenderer() { Shutdown(); }
@@ -48,12 +51,22 @@ public:
         return hr;
     }
 
-    void BeforeResize() { ReleaseTarget(); }
+    void BeforeResize() {
+        ReleaseTarget();
+        // El tamaño del texto depende de la altura del viewport. Al arrastrar
+        // la ventana nacen muchos tamaños distintos; vaciarlos aqui evita que
+        // la cache crezca por cada pixel recorrido durante un resize largo.
+        for (auto& value : textFormats_) Release(value.second);
+        textFormats_.clear();
+    }
 
     HRESULT Draw(const std::shared_ptr<const OverlayConfig>& config,
                  const OverlayStats& stats, const RECT& viewport, bool latencyHud) {
+        // Si no hay nada que dibujar regresamos rapidito. Cero trabajo extra por
+        // tener el sistema de overlays compilado pero apagado.
         const bool regularOverlays = config && config->enabled && !config->items.empty();
-        if (!target_ || (!regularOverlays && !latencyHud)) return S_OK;
+        const bool diagnostics = stats.pacingScope || !stats.noticeText.empty();
+        if (!target_ || (!regularOverlays && !latencyHud && !diagnostics)) return S_OK;
         const float viewportWidth = static_cast<float>(viewport.right - viewport.left);
         const float viewportHeight = static_cast<float>(viewport.bottom - viewport.top);
         if (viewportWidth < 1.0f || viewportHeight < 1.0f) return S_OK;
@@ -105,6 +118,8 @@ public:
         }
 
         if (latencyHud) DrawLatencyHud(stats, viewport, viewportHeight);
+        if (stats.pacingScope) DrawFramePacingScope(stats, viewport, viewportWidth, viewportHeight);
+        if (!stats.noticeText.empty()) DrawAnimatedNotice(stats, viewport, viewportWidth, viewportHeight);
 
         target_->PopAxisAlignedClip();
         const HRESULT hr = target_->EndDraw();
@@ -137,6 +152,8 @@ private:
     }
 
     IDWriteTextFormat* GetTextFormat(const OverlayItem& item, float pixels) {
+        // Crear formatos de texto cada frame seria un desperdicio. Los dejamos
+        // en cache usando fuente, tamaño y alineacion como llave.
         const unsigned rounded = static_cast<unsigned>(std::lround(pixels * 10.0f));
         const std::wstring key = item.fontFamily + L"|" + std::to_wstring(rounded) + L"|" +
                                  std::to_wstring(static_cast<int>(item.alignment));
@@ -160,6 +177,8 @@ private:
     }
 
     ID2D1Bitmap* GetBitmap(const OverlayItem& item) {
+        // Igual con los PNG: se suben a Direct2D una vez y se reutilizan hasta
+        // que cambie el target por resize.
         if (item.imagePath.empty() || !item.imagePixels || !target_) return nullptr;
         const OverlayImagePixels* imageKey = item.imagePixels.get();
         auto found = bitmaps_.find(imageKey);
@@ -225,6 +244,8 @@ private:
     }
 
     void DrawCrosshair(const OverlayItem& item, const RECT& viewport, float viewportHeight) {
+        // Cuatro brazos con un huequito al centro para no tapar justo lo que
+        // quieres volarle a alguien en el shooter. Ciencia.
         const float scale = viewportHeight / 1080.0f;
         const float size = std::max(8.0f, item.fontSize * scale);
         const float gap = size * 0.20f;
@@ -248,6 +269,8 @@ private:
     }
 
     void DrawLatencyHud(const OverlayStats& stats, const RECT& viewport, float viewportHeight) {
+        // HUD intencionalmente sencillo: un numero grande que cambia al activar
+        // VSync, sin aventarle al usuario todo el laboratorio encima.
         const float scale = std::max(0.65f, viewportHeight / 1080.0f);
         const float left = viewport.left + 14.0f * scale;
         const float top = viewport.top + 14.0f * scale;
@@ -272,6 +295,117 @@ private:
                                                 box.bottom - 5.0f * scale);
         target_->DrawTextW(text, static_cast<UINT32>(wcslen(text)), format, textRect, brush_,
                            D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+    }
+
+    void DrawFramePacingScope(const OverlayStats& stats, const RECT& viewport,
+                              float viewportWidth, float viewportHeight) {
+        // Mini osciloscopio visual: verde cuando el intervalo va parejo y rojo
+        // cuando un frame se sale mas de 2 ms del promedio.
+        const float scale = std::max(0.62f, std::min(viewportWidth / 1920.0f,
+                                                     viewportHeight / 1080.0f));
+        const float width = std::min(590.0f * scale, viewportWidth - 28.0f * scale);
+        const float height = 190.0f * scale;
+        const float left = viewport.left + 14.0f * scale;
+        const float bottom = viewport.bottom - 14.0f * scale;
+        const D2D1_RECT_F box = D2D1::RectF(left, bottom - height, left + width, bottom);
+        brush_->SetColor(D2D1::ColorF(0.018f, 0.024f, 0.034f, 0.86f));
+        target_->FillRoundedRectangle(D2D1::RoundedRect(box, 9.0f * scale, 9.0f * scale), brush_);
+        brush_->SetColor(D2D1::ColorF(0.23f, 0.84f, 0.69f, 0.62f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(box, 9.0f * scale, 9.0f * scale),
+                                      brush_, std::max(1.0f, scale));
+
+        OverlayItem titleStyle{};
+        titleStyle.fontFamily = L"Segoe UI";
+        titleStyle.alignment = OverlayAlignment::Left;
+        IDWriteTextFormat* titleFormat = GetTextFormat(titleStyle, 16.0f * scale);
+        IDWriteTextFormat* valueFormat = GetTextFormat(titleStyle, 14.0f * scale);
+        if (!titleFormat || !valueFormat) return;
+
+        brush_->SetColor(D2D1::ColorF(0.45f, 0.94f, 0.81f, 1.0f));
+        const wchar_t* title = stats.english ? L"FRAME PACING SCOPE" : L"OSCILOSCOPIO DE FRAME PACING";
+        D2D1_RECT_F titleRect = D2D1::RectF(box.left + 13.0f * scale, box.top + 8.0f * scale,
+                                           box.right - 10.0f * scale, box.top + 31.0f * scale);
+        target_->DrawTextW(title, static_cast<UINT32>(wcslen(title)), titleFormat, titleRect, brush_,
+                           D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+        wchar_t values[300]{};
+        _snwprintf_s(values, _countof(values), _TRUNCATE,
+            stats.english
+                ? L"Input %.2f ms   Jitter %.2f ms   Queue %u/1   Governor drops %llu\nGPU %.2f ms   Present %.2f ms   Range %.2f-%.2f ms"
+                : L"Entrada %.2f ms   Jitter %.2f ms   Cola %u/1   Descartes del governor %llu\nGPU %.2f ms   Presentación %.2f ms   Rango %.2f-%.2f ms",
+            stats.frameIntervalMs, stats.frameJitterMs, stats.queueDepth,
+            stats.governorDiscardedFrames, stats.processingMs, stats.presentMs,
+            stats.frameMinimumMs, stats.frameMaximumMs);
+        brush_->SetColor(D2D1::ColorF(0.88f, 0.92f, 0.97f, 0.96f));
+        D2D1_RECT_F valuesRect = D2D1::RectF(box.left + 13.0f * scale, box.top + 31.0f * scale,
+                                            box.right - 10.0f * scale, box.top + 73.0f * scale);
+        target_->DrawTextW(values, static_cast<UINT32>(wcslen(values)), valueFormat, valuesRect,
+                           brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+        const D2D1_RECT_F graph = D2D1::RectF(box.left + 13.0f * scale, box.top + 80.0f * scale,
+                                             box.right - 13.0f * scale, box.bottom - 12.0f * scale);
+        brush_->SetColor(D2D1::ColorF(0.10f, 0.14f, 0.19f, 0.95f));
+        target_->FillRectangle(graph, brush_);
+        const double center = stats.frameIntervalMs > 0.0 ? stats.frameIntervalMs : 16.6667;
+        const double low = std::max(1.0, center - 5.0);
+        const double high = std::max(low + 2.0, center + 5.0);
+        auto graphY = [&](double value) {
+            const double normalized = std::clamp((value - low) / (high - low), 0.0, 1.0);
+            return graph.bottom - static_cast<float>(normalized) * (graph.bottom - graph.top);
+        };
+        brush_->SetColor(D2D1::ColorF(0.34f, 0.43f, 0.54f, 0.65f));
+        target_->DrawLine(D2D1::Point2F(graph.left, graphY(center)),
+                          D2D1::Point2F(graph.right, graphY(center)), brush_, 1.0f);
+        if (stats.frameIntervalCount < 2) return;
+        const float step = (graph.right - graph.left) /
+                           static_cast<float>(stats.frameIntervalCount - 1);
+        for (std::size_t i = 1; i < stats.frameIntervalCount; ++i) {
+            const float previous = stats.frameIntervalsMs[i - 1];
+            const float current = stats.frameIntervalsMs[i];
+            const bool spike = std::fabs(current - center) > 2.0;
+            brush_->SetColor(spike ? D2D1::ColorF(1.0f, 0.47f, 0.36f, 0.95f)
+                                   : D2D1::ColorF(0.32f, 0.94f, 0.75f, 0.95f));
+            target_->DrawLine(D2D1::Point2F(graph.left + step * static_cast<float>(i - 1),
+                                            graphY(previous)),
+                              D2D1::Point2F(graph.left + step * static_cast<float>(i),
+                                            graphY(current)),
+                              brush_, std::max(1.1f, 1.6f * scale));
+        }
+    }
+
+    void DrawAnimatedNotice(const OverlayStats& stats, const RECT& viewport,
+                            float viewportWidth, float viewportHeight) {
+        const NoticeAnimation animation = ComputeNoticeAnimation(
+            stats.noticeAgeMs, stats.noticeDurationMs);
+        if (animation.alpha <= 0.001f) return;
+        const float scale = std::max(0.68f, std::min(viewportWidth / 1920.0f,
+                                                     viewportHeight / 1080.0f));
+        const float width = std::min(720.0f * scale, viewportWidth - 32.0f * scale);
+        const float height = 78.0f * scale;
+        const float left = viewport.left + (viewportWidth - width) * 0.5f;
+        const float top = viewport.top + 24.0f * scale - animation.slide * 24.0f * scale;
+        const D2D1_RECT_F box = D2D1::RectF(left, top, left + width, top + height);
+        brush_->SetColor(D2D1::ColorF(0.025f, 0.034f, 0.048f, 0.92f * animation.alpha));
+        target_->FillRoundedRectangle(D2D1::RoundedRect(box, 11.0f * scale, 11.0f * scale), brush_);
+        brush_->SetColor(D2D1::ColorF(0.31f, 0.91f, 0.76f, 0.88f * animation.alpha));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(box, 11.0f * scale, 11.0f * scale),
+                                      brush_, std::max(1.0f, 1.4f * scale));
+
+        OverlayItem style{};
+        style.fontFamily = L"Segoe UI";
+        style.alignment = OverlayAlignment::Center;
+        IDWriteTextFormat* format = GetTextFormat(style, 19.0f * scale);
+        if (!format) return;
+        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        brush_->SetColor(D2D1::ColorF(0.94f, 0.97f, 1.0f, animation.alpha));
+        const D2D1_RECT_F textRect = D2D1::RectF(box.left + 18.0f * scale,
+                                                box.top + 8.0f * scale,
+                                                box.right - 18.0f * scale,
+                                                box.bottom - 8.0f * scale);
+        target_->DrawTextW(stats.noticeText.c_str(), static_cast<UINT32>(stats.noticeText.size()),
+                           format, textRect, brush_, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                           DWRITE_MEASURING_MODE_NATURAL);
+        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     }
 
     ID2D1Factory* d2dFactory_ = nullptr;

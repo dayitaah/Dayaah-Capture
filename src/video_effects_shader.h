@@ -1,13 +1,15 @@
 #pragma once
 
 inline constexpr char kVideoEffectsShader[] = R"HLSL(
+// Shader propio y compacto: nitidez adaptativa, color y CRT en una sola pasada.
+// Una sola pasada significa menos texturas intermedias y menos viaje por la GPU.
 Texture2D video : register(t0);
 SamplerState linearClamp : register(s0);
 cbuffer Parameters : register(b0) {
-    float4 geometry; // reciprocal texture dimensions, sharpness, curvature
-    float4 color;    // contrast, saturation, inverse gamma, temperature
-    float4 crt;      // scanline strength, mask strength, line count, unused
-    float4 rect;     // content rectangle in normalized texture coordinates
+    float4 geometry; // tamaño inverso, nitidez y curvatura
+    float4 color;    // contraste, saturacion, gamma inversa y temperatura
+    float4 crt;      // scanlines, mascara, numero de lineas y espacio libre
+    float4 rect;     // rectangulo de video en coordenadas normalizadas
 };
 struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; };
 Vertex VSMain(uint id : SV_VertexID) {
@@ -25,7 +27,7 @@ float4 PSMain(Vertex v) : SV_Target {
     float2 p = (v.uv - rect.xy) / (rect.zw - rect.xy);
     if (any(p < 0) || any(p > 1)) return float4(0, 0, 0, 1);
     float2 centered = p * 2 - 1;
-    // Inverse barrel mapping; outside the tube remains black.
+    // Curvatura inversa tipo barril; fuera del tubito se queda negro.
     float2 warped = centered * (1 + geometry.w * centered.yx * centered.yx);
     p = warped * 0.5 + 0.5;
     if (any(p < 0) || any(p > 1)) return float4(0, 0, 0, 1);
@@ -50,7 +52,7 @@ float4 PSMain(Vertex v) : SV_Target {
         float3 margin = (hi - lo) * (0.04 + geometry.z * 0.08);
         c = clamp(c + (c - blur) * gain, lo - margin, hi + margin);
     }
-    // Creative SDR controls follow input-range interpretation.
+    // Los controles creativos SDR van despues de interpretar el rango de entrada.
     c *= float3(1 + color.w * 0.12, 1, 1 - color.w * 0.12);
     c = lerp(Luma(c).xxx, c, color.y);
     c = saturate((c - 0.5) * color.x + 0.5);

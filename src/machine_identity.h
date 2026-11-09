@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+// Esta huella NO sale a internet ni pretende ser seguridad bancaria. Solo nos
+// ayuda a saber si el ZIP se abrio en otra PC y debemos mostrar Configuracion
+// como si fuera el primer arranque.
+
 inline bool ValidFirmwareUuid(const BYTE* uuid) {
     bool allZero = true;
     bool allOnes = true;
@@ -19,6 +23,8 @@ inline bool ValidFirmwareUuid(const BYTE* uuid) {
 }
 
 inline std::vector<BYTE> FirmwareUuid() {
+    // SMBIOS tipo 1 guarda el UUID del sistema. Recorremos la tabla con cuidado
+    // porque algunos BIOS reportan basura, ceros o puros FF.
     constexpr DWORD provider = (static_cast<DWORD>('R') << 24) |
                                (static_cast<DWORD>('S') << 16) |
                                (static_cast<DWORD>('M') << 8) |
@@ -49,6 +55,7 @@ inline std::vector<BYTE> FirmwareUuid() {
 }
 
 inline std::wstring MachineGuid() {
+    // Plan B: identificador local que crea Windows durante la instalacion.
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", 0,
                       KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key) != ERROR_SUCCESS) return {};
@@ -64,6 +71,8 @@ inline std::wstring MachineGuid() {
 }
 
 inline std::wstring DeviceFingerprint() {
+    // FNV-1a nos deja una cadena corta y estable. No guardamos el UUID o el
+    // MachineGuid completos en el INI porque tampoco hace falta andar de metiche.
     std::uint64_t hash = 1469598103934665603ull;
     auto add = [&](const void* bytes, size_t count) {
         const BYTE* data = static_cast<const BYTE*>(bytes);

@@ -7,6 +7,8 @@
 #include "video_effects_model.h"
 #include "video_effects_shader.h"
 
+// Ruta opcional de shaders. Si no puede iniciar, el renderer principal sigue
+// directo y el video no se cae nomas porque el CRT queria ponerse artistico.
 class VideoEffectsRenderer {
 public:
     ~VideoEffectsRenderer() { Shutdown(); }
@@ -16,7 +18,8 @@ public:
 
     HRESULT Initialize(ID3D11Device* device) {
         Shutdown();
-        // Resolve the compiler from Windows, never the current folder.
+        // Cargamos el compilador desde System32, JAMAS desde la carpeta actual.
+        // Ademas de ser mas seguro evita que una DLL random suplante la oficial.
         wchar_t path[MAX_PATH]{};
         const UINT length = GetSystemDirectoryW(path, MAX_PATH);
         if (!length || length + 20 >= MAX_PATH) return E_FAIL;
@@ -78,6 +81,8 @@ public:
 
     HRESULT CreateTarget(ID3D11Device* device, ID3D11VideoDevice* videoDevice,
                          ID3D11VideoProcessorEnumerator* processor, IDXGISwapChain1* swapChain) {
+        // El Video Processor deja su resultado en `image_`; el pixel shader lo
+        // lee y escribe el resultado final en el back buffer de la swap chain.
         BeforeResize();
         if (!vs_ || !ps_ || !constants_ || !sampler_ || !raster_ || !depth_) return E_FAIL;
         ID3D11Texture2D* back = nullptr;
@@ -103,6 +108,8 @@ public:
     }
 
     HRESULT Draw(ID3D11DeviceContext* context, const VideoEffects& s, const RECT& r) {
+        // Parameters son 64 bytes que cambian por frame. El shader es el mismo;
+        // solo movemos numeros, no lo recompilamos cada que tocas un slider.
         if (!Ready()) return E_UNEXPECTED;
         Parameters p{};
         p.geometry[0] = 1.0f / width_;
@@ -125,7 +132,8 @@ public:
         if (FAILED(hr)) return hr;
         std::memcpy(mapped.pData, &p, sizeof(p));
         context->Unmap(constants_, 0);
-        // D2D may have changed graphics state during the previous frame.
+        // Direct2D pudo cambiar el estado grafico en el frame anterior, asi que
+        // declaramos todo lo que el shader necesita en vez de confiar en sobras.
         context->IASetInputLayout(nullptr);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->VSSetShader(vs_, nullptr, 0);
@@ -141,7 +149,8 @@ public:
         context->PSSetSamplers(0, 1, &sampler_);
         context->PSSetShaderResources(0, 1, &source_);
         context->Draw(3, 0);
-        // Unbind before D2D, the next VideoProcessorBlt or ResizeBuffers.
+        // Desconectamos recursos antes de Direct2D, el siguiente Blt o un resize.
+        // D3D11 no deja leer y escribir la misma textura al mismo tiempo.
         ID3D11ShaderResourceView* empty = nullptr;
         context->PSSetShaderResources(0, 1, &empty);
         context->OMSetRenderTargets(0, nullptr, nullptr);

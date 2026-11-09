@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -9,6 +11,9 @@
 enum class OverlayItemType { Text, Clock, Image, Stats, Crosshair };
 enum class OverlayAnchor { TopLeft, TopRight, BottomLeft, BottomRight, Center };
 enum class OverlayAlignment { Left, Center, Right };
+
+// El modelo no sabe nada de Direct2D ni de ventanas. Solo describe QUE queremos
+// dibujar; por eso tambien se puede guardar en JSON y probar sin una GPU.
 
 struct OverlayImagePixels {
     std::uint32_t width = 0;
@@ -45,6 +50,8 @@ struct OverlayConfig {
 };
 
 struct OverlayStats {
+    // Foto de la telemetria del frame actual. Se la pasamos completa al renderer
+    // para que el HUD no ande leyendo veinte variables globales por separado.
     std::uint64_t receivedFrames = 0;
     std::uint64_t presentedFrames = 0;
     std::uint64_t discardedFrames = 0;
@@ -57,6 +64,20 @@ struct OverlayStats {
     std::wstring format;
     bool lowLatency = true;
     std::uint32_t approximateLatencyMs = 0;
+    double processingMs = 0.0;
+    double presentMs = 0.0;
+    double frameIntervalMs = 0.0;
+    double frameJitterMs = 0.0;
+    double frameMinimumMs = 0.0;
+    double frameMaximumMs = 0.0;
+    std::array<float, 120> frameIntervalsMs{};
+    std::size_t frameIntervalCount = 0;
+    std::uint32_t queueDepth = 0;
+    std::uint64_t governorDiscardedFrames = 0;
+    bool pacingScope = false;
+    std::wstring noticeText;
+    std::uint64_t noticeAgeMs = 0;
+    std::uint64_t noticeDurationMs = 0;
     bool english = false;
 };
 
@@ -68,8 +89,12 @@ struct OverlayRectF {
 };
 
 inline OverlayRectF ResolveOverlayRect(const OverlayItem& item) {
+    // Las posiciones son normalizadas (0..1), asi que un overlay se conserva en
+    // el mismo lugar aunque la ventana pase de 1080p a una PiP chiquita.
     OverlayRectF result{};
     if (item.type == OverlayItemType::Crosshair) {
+        // La mira SIEMPRE vive en el centro. El editor puede cambiar tamaño y
+        // color, pero no dejarla chueca por accidente.
         result.left = 0.5f - item.width * 0.5f;
         result.top = 0.5f - item.height * 0.5f;
         result.right = result.left + item.width;
@@ -118,6 +143,7 @@ inline void SetOverlayTopLeft(OverlayItem& item, float left, float top) {
 }
 
 inline void ClampOverlayItem(OverlayItem& item) {
+    // Corralito de seguridad para perfiles editados a mano o valores raros.
     item.width = std::clamp(item.width, 0.03f, 1.0f);
     item.height = std::clamp(item.height, 0.03f, 1.0f);
     item.opacity = std::clamp(item.opacity, 0.0f, 1.0f);
@@ -138,6 +164,8 @@ inline void ClampOverlayItem(OverlayItem& item) {
 }
 
 inline OverlayItem MakeDefaultOverlayItem(OverlayItemType type, std::uint64_t id) {
+    // Cada capa nace con algo visible y util para que añadirla no parezca que
+    // "no hizo nada".
     OverlayItem item{};
     item.id = id;
     item.type = type;

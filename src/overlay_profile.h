@@ -21,6 +21,9 @@
 
 namespace overlay_profile {
 
+// Perfil portable y legible. Se guarda como JSON al lado del programa para que
+// puedas respaldarlo, compartirlo o abrirlo y decir "ahh, era esto".
+
 inline std::string ToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
 #ifdef _WIN32
@@ -109,6 +112,8 @@ inline const char* AlignmentName(OverlayAlignment value) {
 }
 
 inline std::string Serialize(const OverlayConfig& config) {
+    // Locale clasico obliga a usar punto decimal aunque Windows este en español.
+    // Si salieran comas, el JSON se haria bolas con sus propios separadores.
     std::ostringstream output;
     output.imbue(std::locale::classic());
     output << std::fixed << std::setprecision(5);
@@ -138,6 +143,8 @@ inline std::string Serialize(const OverlayConfig& config) {
 }
 
 inline bool ReadStringToken(const std::string& source, size_t& position, std::string& output) {
+    // Parser pequeño hecho para NUESTRO esquema. Acepta escapes JSON de verdad,
+    // incluido Unicode, sin cargar una dependencia enorme solo para este archivo.
     while (position < source.size() && (source[position] == ' ' || source[position] == '\t' ||
            source[position] == '\r' || source[position] == '\n')) ++position;
     if (position >= source.size() || source[position++] != '"') return false;
@@ -282,6 +289,8 @@ template <typename T> inline bool GetNumber(const std::string& object, const cha
 }
 
 inline bool Parse(const std::string& json, OverlayConfig& config, std::wstring& error) {
+    // Parseamos en una copia temporal. La configuracion buena solo se reemplaza
+    // al final; un JSON mocho no destruye lo que ya estaba funcionando.
     OverlayConfig parsed{};
     const size_t start = json.find_first_not_of(" \t\r\n");
     if (start == std::string::npos || json[start] != '{' ||
@@ -289,8 +298,15 @@ inline bool Parse(const std::string& json, OverlayConfig& config, std::wstring& 
         error = L"El perfil JSON está incompleto o contiene datos extra.";
         return false;
     }
-    if (!GetBool(json, "enabled", parsed.enabled)) {
-        error = L"El perfil no contiene el campo enabled.";
+    std::uint32_t schema = 0;
+    if (!GetNumber(json, "schema", schema) || schema != 1) {
+        error = L"El perfil usa un esquema desconocido o no declara schema 1.";
+        return false;
+    }
+    size_t enabledPosition = 0;
+    if (FindValue(json, "enabled", enabledPosition) &&
+        !GetBool(json, "enabled", parsed.enabled)) {
+        error = L"El campo enabled del perfil no es válido.";
         return false;
     }
     size_t itemsPosition = 0;
@@ -306,34 +322,67 @@ inline bool Parse(const std::string& json, OverlayConfig& config, std::wstring& 
         const size_t end = FindObjectEnd(json, cursor);
         if (end == std::string::npos) { error = L"Objeto de overlay incompleto."; return false; }
         const std::string object = json.substr(cursor, end - cursor + 1);
-        OverlayItem item{};
-        std::wstring type, anchor, alignment;
-        if (!GetNumber(object, "id", item.id) || !GetString(object, "type", type) ||
-            !GetBool(object, "visible", item.visible) || !GetString(object, "name", item.name) ||
-            !GetString(object, "text", item.text) || !GetString(object, "imagePath", item.imagePath) ||
-            !GetString(object, "fontFamily", item.fontFamily) ||
-            !GetNumber(object, "fontSize", item.fontSize) ||
-            !GetNumber(object, "opacity", item.opacity) || !GetNumber(object, "argb", item.argb) ||
-            !GetString(object, "anchor", anchor) || !GetString(object, "alignment", alignment) ||
-            !GetNumber(object, "x", item.x) || !GetNumber(object, "y", item.y) ||
-            !GetNumber(object, "width", item.width) || !GetNumber(object, "height", item.height) ||
-            !GetBool(object, "clock24h", item.clock24h)) {
-            error = L"Un elemento del perfil está incompleto o contiene valores inválidos.";
+        std::uint64_t id = 0;
+        std::wstring type;
+        if (!GetNumber(object, "id", id) || !GetString(object, "type", type)) {
+            error = L"Cada overlay necesita al menos id y type válidos.";
             return false;
         }
-        if (type == L"clock") item.type = OverlayItemType::Clock;
-        else if (type == L"image") item.type = OverlayItemType::Image;
-        else if (type == L"stats") item.type = OverlayItemType::Stats;
-        else if (type == L"crosshair") item.type = OverlayItemType::Crosshair;
-        else item.type = OverlayItemType::Text;
-        if (anchor == L"top-right") item.anchor = OverlayAnchor::TopRight;
-        else if (anchor == L"bottom-left") item.anchor = OverlayAnchor::BottomLeft;
-        else if (anchor == L"bottom-right") item.anchor = OverlayAnchor::BottomRight;
-        else if (anchor == L"center") item.anchor = OverlayAnchor::Center;
-        else item.anchor = OverlayAnchor::TopLeft;
-        if (alignment == L"center") item.alignment = OverlayAlignment::Center;
-        else if (alignment == L"right") item.alignment = OverlayAlignment::Right;
-        else item.alignment = OverlayAlignment::Left;
+        OverlayItemType itemType = OverlayItemType::Text;
+        if (type == L"text") itemType = OverlayItemType::Text;
+        else if (type == L"clock") itemType = OverlayItemType::Clock;
+        else if (type == L"image") itemType = OverlayItemType::Image;
+        else if (type == L"stats") itemType = OverlayItemType::Stats;
+        else if (type == L"crosshair") itemType = OverlayItemType::Crosshair;
+        else {
+            error = L"Un overlay contiene un type desconocido.";
+            return false;
+        }
+        OverlayItem item = MakeDefaultOverlayItem(itemType, id);
+        std::wstring anchor;
+        std::wstring alignment;
+
+        // Las versiones nuevas pueden agregar campos sin romper perfiles viejos.
+        // Si un valor opcional falta usamos el default bonito del tipo; si esta
+        // presente pero viene chueco, ahi si avisamos en vez de adivinar.
+        auto optionalString = [&](const char* key, std::wstring& value) {
+            size_t position = 0;
+            return !FindValue(object, key, position) || GetString(object, key, value);
+        };
+        auto optionalBool = [&](const char* key, bool& value) {
+            size_t position = 0;
+            return !FindValue(object, key, position) || GetBool(object, key, value);
+        };
+        auto optionalNumber = [&](const char* key, auto& value) {
+            size_t position = 0;
+            return !FindValue(object, key, position) || GetNumber(object, key, value);
+        };
+        if (!optionalBool("visible", item.visible) || !optionalString("name", item.name) ||
+            !optionalString("text", item.text) || !optionalString("imagePath", item.imagePath) ||
+            !optionalString("fontFamily", item.fontFamily) ||
+            !optionalNumber("fontSize", item.fontSize) ||
+            !optionalNumber("opacity", item.opacity) || !optionalNumber("argb", item.argb) ||
+            !optionalString("anchor", anchor) || !optionalString("alignment", alignment) ||
+            !optionalNumber("x", item.x) || !optionalNumber("y", item.y) ||
+            !optionalNumber("width", item.width) || !optionalNumber("height", item.height) ||
+            !optionalBool("clock24h", item.clock24h)) {
+            error = L"Un elemento del perfil contiene un valor opcional inválido.";
+            return false;
+        }
+        if (!anchor.empty()) {
+            if (anchor == L"top-left") item.anchor = OverlayAnchor::TopLeft;
+            else if (anchor == L"top-right") item.anchor = OverlayAnchor::TopRight;
+            else if (anchor == L"bottom-left") item.anchor = OverlayAnchor::BottomLeft;
+            else if (anchor == L"bottom-right") item.anchor = OverlayAnchor::BottomRight;
+            else if (anchor == L"center") item.anchor = OverlayAnchor::Center;
+            else { error = L"Un overlay contiene un anchor desconocido."; return false; }
+        }
+        if (!alignment.empty()) {
+            if (alignment == L"left") item.alignment = OverlayAlignment::Left;
+            else if (alignment == L"center") item.alignment = OverlayAlignment::Center;
+            else if (alignment == L"right") item.alignment = OverlayAlignment::Right;
+            else { error = L"Un overlay contiene un alignment desconocido."; return false; }
+        }
         ClampOverlayItem(item);
         parsed.items.push_back(std::move(item));
         cursor = end + 1;
@@ -360,6 +409,8 @@ inline bool Parse(const std::string& json, OverlayConfig& config, std::wstring& 
 
 #ifdef _WIN32
 inline bool Save(const std::wstring& path, const OverlayConfig& config, std::wstring& error) {
+    // Guardado seguro: primero .tmp, FlushFileBuffers y luego reemplazo atomico.
+    // Si se va la luz a media escritura, el perfil anterior sigue enterito.
     const std::string json = Serialize(config);
     const std::wstring temporary = path + L".tmp." + std::to_wstring(GetCurrentProcessId());
     HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,

@@ -7,6 +7,8 @@
 #include "localization.h"
 #include "video_effects_model.h"
 
+// Ventanita de sliders, nada mas. El procesamiento real ocurre en la GPU; este
+// archivo solo modifica valores y los manda al viewer en vivo.
 class VideoEffectsEditor {
 public:
     using Changed = std::function<void(const VideoEffects&)>;
@@ -43,6 +45,8 @@ public:
     }
     void Close() { if (window_) DestroyWindow(window_); }
     void Sync(const VideoEffects& s) {
+        // Sync tambien se usa cuando F6 cambia efectos fuera del editor, para
+        // que la ventana nunca enseñe una cosa mientras la GPU hace otra.
         settings_ = s;
         if (!window_ || !checks_[0]) return;
         const bool flags[] = {s.enabled, s.sharpenEnabled, s.colorEnabled, s.crtEnabled};
@@ -169,6 +173,7 @@ private:
         Publish();
     }
     void Publish() {
+        // Primero encerramos valores en rangos seguros y luego avisamos.
         settings_.Sanitize();
         Sync(settings_);
         if (changed_) changed_(settings_);
