@@ -8,7 +8,7 @@ if not exist "%~dp0build" mkdir "%~dp0build"
 pushd "%~dp0src"
 
 rc.exe /nologo /fo DayaahCapture.res DayaahCapture.rc || goto failed
-cl.exe /nologo /std:c++17 /utf-8 /O2 /EHsc /DUNICODE /D_UNICODE ^
+cl.exe /nologo /std:c++17 /utf-8 /O2 /EHsc /MT /DUNICODE /D_UNICODE ^
   main.cpp DayaahCapture.res /Fe:"..\build\DayaahCapture.exe" ^
   /link /SUBSYSTEM:WINDOWS ^
   ole32.lib oleaut32.lib uuid.lib d3d11.lib dxgi.lib dxguid.lib ^
