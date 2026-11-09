@@ -31,6 +31,7 @@ proceso. No necesita MPV, FFmpeg, instalador, cuentas ni servicios en segundo
 plano.
 
 La versión estable actual es la **v2.0.1**.
+PD: si quieren versiones beta con nuevas funciones que ando probando mandenme mensaje a discord @dayaah
 
 ## Características
 
