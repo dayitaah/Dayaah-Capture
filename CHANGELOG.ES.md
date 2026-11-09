@@ -2,6 +2,49 @@
 
 **Español** | [English](CHANGELOG.md)
 
+## 2.2.0 — 2026-11-07
+
+Esta es la única actualización acumulativa después de 2.0.1; no hay entradas
+2.1.x separadas que seguir.
+
+- Añadido Picture in Picture con `F12`: visor sin marco, siempre visible,
+  movible, redimensionable y con geometría persistente. Reutiliza la captura,
+  pausa los efectos para ahorrar GPU y los restaura exactamente al salir.
+- Overlays, mira, audio y HUD de telemetría siguen disponibles en PiP. `Esc`
+  sale primero de PiP y el doble clic cambia a pantalla completa.
+- Renombrado el modo rápido a **Latencia mínima (No VSync - VRR)**. Negocia el
+  soporte de tearing y usa `DXGI_PRESENT_ALLOW_TEARING` cuando Windows lo permite.
+- Añadido Dayaah AutoTune con puntuación de modos anunciados y validación real
+  de cinco segundos usando pacing, descartes, GPU y tiempo de presentación.
+- AutoTune, los cambios de modo y Phoenix ahora toleran drivers que tardan un
+  poquito en soltar el pin de video, con una breve espera de reapertura,
+  reintentos limitados y registro de la etapa exacta que falló al iniciar.
+- Añadido Latency Governor de último frame, sustitución del trabajo viejo antes
+  de la GPU y telemetría de descartes.
+- Añadido el Osciloscopio de Frame Pacing con `F9`: intervalos, jitter, cola,
+  tiempos de GPU/presentación y gráfica de los últimos 120 frames.
+- Añadidos avisos suaves y detección de diferencias 59.94/60 Hz con VSync.
+- Añadido Phoenix Recovery para bloqueos, errores del reader y cambios de
+  formato, con un máximo de tres intentos. Si se rinde, vuelve a Configuración
+  reemplazando el proceso sin audio residual ni último frame congelado.
+- Cada callback del Source Reader queda aislado con un ID de sesión. Un callback
+  viejo ya no puede entregar frames, reportar errores, prender el evento de
+  flush nuevo ni iniciar una segunda cadena `ReadSample` sobre el reader nuevo.
+- Cerrada la carrera de vida del Source Reader con un candado pequeño, `AddRef`
+  local alrededor de `ReadSample` y orden seguro de `Flush`, detach y liberación.
+- Reemplazados los vectores temporales y las dos copias de píxeles por buffers
+  reutilizables, `Lock2D` por filas, salida contigua y el fallback de lock plano.
+  I420 conserva únicamente el intercalado de CPU que sí necesita.
+- Los arranques normales rotan `DayaahCapture.log` a `.log.1`. Los reinicios
+  internos conservan el log, añaden un separador y registran el motivo Phoenix.
+- Evitada la repetición de la tecla `M` al mantenerla presionada.
+- Eliminados los defaults amarrados a UGREEN y al nombre genérico HDMI. Sin una
+  selección guardada se usa el primer video y el audio queda desactivado.
+- Los perfiles de overlays validan schema 1, conservan defaults si faltan campos
+  opcionales y respaldan un original inválido como `.bad` antes de sobrescribir.
+- Limitada la carga de PNG a 8192 píxeles por lado y 32 millones en total, con
+  manejo de falta de memoria y limpieza de formatos de texto durante resize.
+
 ## 2.0.1 
 
 - Corregido **Configuración**: ahora reinicia el proceso en modo configuración
