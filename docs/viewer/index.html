@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#050c11" />
+  <meta name="description" content="Dayaah Capture Web Viewer — test a USB capture card locally in your browser." />
+  <title>Dayaah Capture Web Viewer — Beta</title>
+  <link rel="stylesheet" href="./viewer.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div><strong>Dayaah Capture</strong><small>WEB VIEWER · BETA</small></div>
+      </div>
+      <div class="top-actions">
+        <span class="privacy" data-i18n="privacy">LOCAL · NO TELEMETRY</span>
+        <button class="icon-button" id="languageButton" type="button" aria-label="Switch language">ES</button>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <aside class="setup-panel">
+        <div class="panel-heading">
+          <span>01</span>
+          <div><strong data-i18n="setup">Setup</strong><small data-i18n="setup_hint">Choose the capture card and start the local preview.</small></div>
+        </div>
+
+        <label>
+          <span data-i18n="video_device">Video device</span>
+          <select id="videoDevice"></select>
+        </label>
+        <label>
+          <span data-i18n="audio_device">Audio device</span>
+          <select id="audioDevice"></select>
+        </label>
+        <label>
+          <span data-i18n="quality">Requested mode</span>
+          <select id="qualityPreset">
+            <option value="auto" data-i18n="quality_auto">Automatic</option>
+            <option value="1080p60">1920 × 1080 · 60 FPS</option>
+            <option value="1080p120">1920 × 1080 · 120 FPS</option>
+            <option value="1440p60">2560 × 1440 · 60 FPS</option>
+            <option value="2160p60">3840 × 2160 · 60 FPS</option>
+          </select>
+        </label>
+
+        <div class="permission-note">
+          <strong data-i18n="permission_title">Permission stays in your hands.</strong>
+          <p data-i18n="permission_text">Camera and microphone access is requested only when you press Start. Nothing is uploaded.</p>
+        </div>
+
+        <div class="primary-actions">
+          <button class="start-button" id="startButton" type="button"><span class="live-dot"></span><span data-i18n="start">Start viewer</span></button>
+          <button class="stop-button" id="stopButton" type="button" disabled data-i18n="stop">Stop</button>
+        </div>
+      </aside>
+
+      <section class="viewer-column">
+        <div class="video-shell" id="videoShell">
+          <video id="video" autoplay playsinline></video>
+          <div class="idle-state" id="idleState">
+            <div class="play-icon" aria-hidden="true">▶</div>
+            <strong data-i18n="idle_title">Ready for HDMI input</strong>
+            <span data-i18n="idle_text">Your capture card normally appears as a camera device.</span>
+          </div>
+          <div class="status-pill" id="statusPill"><span></span><b id="statusText" data-i18n="ready">READY</b></div>
+          <div class="stats" id="stats" hidden>
+            <span><b id="resolutionStat">—</b><small data-i18n="resolution">Resolution</small></span>
+            <span><b id="fpsStat">—</b><small>FPS</small></span>
+            <span><b id="dropStat">0</b><small data-i18n="drops">Browser drops</small></span>
+          </div>
+          <div class="error-box" id="errorBox" role="alert" hidden></div>
+        </div>
+
+        <div class="viewer-toolbar">
+          <div class="actual-mode"><span data-i18n="active_mode">Active mode</span><strong id="activeMode">—</strong></div>
+          <div class="tool-buttons">
+            <button id="muteButton" type="button" disabled><span aria-hidden="true">◉</span><span data-i18n="mute">Mute</span></button>
+            <button id="pipButton" type="button" disabled><span aria-hidden="true">▣</span><span>PiP</span></button>
+            <button id="fullscreenButton" type="button"><span aria-hidden="true">⛶</span><span data-i18n="fullscreen">Fullscreen</span></button>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <footer>
+      <span data-i18n="beta_note">Browser capture APIs choose the final format and may add more latency than the native Windows application.</span>
+      <a href="https://github.com/dayitaah/Dayaah-Capture/releases/latest" target="_blank" rel="noreferrer" data-i18n="native_link">Get the native app ↗</a>
+    </footer>
+  </main>
+  <script src="./viewer.js"></script>
+</body>
+</html>
