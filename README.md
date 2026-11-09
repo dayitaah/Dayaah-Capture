@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version 2.0.1" src="https://img.shields.io/badge/version-2.0.1-53D7B2">
+  <img alt="Version 2.2.0" src="https://img.shields.io/badge/version-2.2.0-53D7B2">
   <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
   <img alt="Licencia MIT" src="https://img.shields.io/badge/license-MIT-53D7B2">
@@ -28,7 +28,7 @@ only the newest frame, and presents it through D3D11. Capture-card audio is
 played through WASAPI in the same process. No MPV, FFmpeg, installer, account,
 or background service is required.
 
-The current stable release is **v2.0.1**.
+The current stable release is **v2.2.0**.
 PD: If you want beta releases send me message on my discord @dayaah
 ## Features
 
@@ -45,7 +45,12 @@ PD: If you want beta releases send me message on my discord @dayaah
 - Automatic enumeration of devices, resolutions, frame rates, and formats.
 - Fullscreen mode, quick mute, and reliable automatic cursor hiding.
 - Local INI configuration that remembers the last selected options.
-
+- New Dayaah Autotune for automatic setup
+- New Latency Gorvernor prevents old frames from showing up
+- New Phoenix Recovery for unstable capture cards
+- New frame-pacing osciloscope with 120 frames of window
+- New Picture-in-Picture option that shows the viewer Always on Top and is rezizable
+  
 ## Download and use
 
 1. Open the [latest release](https://github.com/dayitaah/Dayaah-Capture/releases/latest).
@@ -88,9 +93,11 @@ Only one application can use some capture devices at a time.
 | `F6` | Toggle video effects |
 | `F7` | Open video-effect settings |
 | `F8` | Toggle approximate latency |
+| `F9` | Toggle the Frame Pacing Scope |
 | `F10` | Toggle overlays |
 | `F11` or double-click | Toggle fullscreen |
-| `Esc` | Leave fullscreen or restore the window |
+| `F12` | Enter or leave Picture in Picture |
+| `Esc` | Leave PiP, leave fullscreen or restore the window |
 | `M` | Toggle audio mute |
 | Move the mouse | Show the cursor; it hides after one second of real inactivity |
 
@@ -130,26 +137,18 @@ rejected, the application attempts to restore the previous mode.
 
 ## What is included in new versions
 
-## 2.0.1 fix
+## 2.2.0
 
-- **Settings** now performs a clean process restart into setup, removing the
-  final video frame and completely closing the previous audio path.
-
-## New in 2.0.0
-
-- Setup video modes are split into resolution, FPS and format selectors.
-- NV12, YUY2, XRGB, I420 and P010 raw formats with performance/compatibility notices.
-- Full English and Spanish interface selector.
-- Machine-local first run: after one successful capture, later launches go
-  directly to the viewer. Copying the ZIP and INI to another PC shows setup again.
-- Ko-fi and GitHub links at the bottom of setup.
-- Stronger adaptive sharpening with a visibly useful range and local halo limiting.
-- Approximate latency HUD on `F8`.
-- Centered crosshair in the overlay editor.
-- A **Settings** context-menu command to return to setup.
-
-The device fingerprint is stored only as a local hash in `DayaahCapture.ini`.
-It is not transmitted, tied to an account, or used as DRM.
+- Added F12 Picture in Picture: borderless, always on top, movable and resizable, with persistent size and position. Effects pause automatically while overlays, crosshair, audio and telemetry remain available.
+- Renamed the fast path to Minimum latency (No VSync - VRR), using tearing support when available.
+- Added Dayaah AutoTune with mode scoring, live stability testing and safer device reopening for slow capture drivers.
+- Added the latest-frame Latency Governor, which replaces stale frames before GPU processing to prevent latency buildup.
+- Added the F9 Frame Pacing Scope with jitter, queue, GPU and presentation timing, plus a 120-frame graph.
+- Added smooth notifications and a warning for 59.94/60 Hz VSync cadence mismatches.
+- Added Phoenix Recovery for stalls, reader errors and format changes, with three recovery attempts and a safe return to Settings.
+- Hardened Source Reader callbacks, session isolation, shutdown order and thread safety.
+- Reduced per-frame memory copies and allocations using reusable buffers and improved Lock2D handling.
+- Improved log preservation, mute hotkey behavior, first-run device defaults, overlay profile recovery and PNG safety limits.
 
 See [CHANGELOG.md](CHANGELOG.md) for the complete release notes.
 
@@ -183,8 +182,7 @@ with C++**, and a Windows SDK.
 3. Run `src\build-msvc.bat`.
 
 The resulting executable is written to the project root as
-`DayaahCapture.exe`. A MinGW cross-build helper is also included for
-maintainers.
+`DayaahCapture.exe`
 
 ## Reporting bugs
 
@@ -204,7 +202,7 @@ on every run.
 
 - Windows x64 only.
 - +15 and +18 dB may clip an already loud input signal.
-- Not tested HDR Compatibility or VRR
+- Not tested HDR Compatibility
 
 ## Privacy
 
