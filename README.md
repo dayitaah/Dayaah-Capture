@@ -208,6 +208,7 @@ on every run.
 
 Dayaah Capture works locally. It contains no telemetry, advertising, accounts,
 analytics, or network connections.
+https://www.virustotal.com/gui/file/451ebf839a384bed25229b396e2857d14cf4fc75173869fd6768f1bd2f591e58?nocache=1
 
 ## Contributing
 
