@@ -274,26 +274,42 @@ private:
         const float scale = std::max(0.65f, viewportHeight / 1080.0f);
         const float left = viewport.left + 14.0f * scale;
         const float top = viewport.top + 14.0f * scale;
-        const D2D1_RECT_F box = D2D1::RectF(left, top, left + 350.0f * scale,
-                                            top + 48.0f * scale);
+        const bool detailed = stats.compressedPath || stats.frameGeneration;
+        const int detailLines = (stats.compressedPath ? 1 : 0) +
+                                (stats.frameGeneration ? 1 : 0);
+        const float boxWidth = detailed ? 590.0f : 350.0f;
+        const float boxHeight = detailLines == 2 ? 102.0f : (detailed ? 76.0f : 48.0f);
+        const D2D1_RECT_F box = D2D1::RectF(left, top, left + boxWidth * scale,
+                                            top + boxHeight * scale);
         brush_->SetColor(D2D1::ColorF(0.02f, 0.025f, 0.035f, 0.72f));
         target_->FillRoundedRectangle(D2D1::RoundedRect(box, 7.0f * scale, 7.0f * scale), brush_);
         OverlayItem style{};
         style.fontFamily = L"Segoe UI";
-        style.fontSize = 22.0f;
+        style.fontSize = detailed ? 18.0f : 22.0f;
         style.alignment = OverlayAlignment::Left;
-        IDWriteTextFormat* format = GetTextFormat(style, 22.0f * scale);
+        IDWriteTextFormat* format = GetTextFormat(style, style.fontSize * scale);
         if (!format) return;
-        wchar_t text[96]{};
-        _snwprintf_s(text, _countof(text), _TRUNCATE,
+        wchar_t latency[96]{};
+        _snwprintf_s(latency, _countof(latency), _TRUNCATE,
                      stats.english ? L"Estimated latency: %u ms" : L"Latencia aproximada: %u ms",
                      stats.approximateLatencyMs);
+        std::wstring text = latency;
+        if (stats.compressedPath) {
+            text += stats.english
+                ? L"\nCompressed path: device/decode delay is not included"
+                : L"\nRuta comprimida: no incluye toda la latencia de tarjeta/decoder";
+        }
+        if (stats.frameGeneration) {
+            text += stats.english
+                ? L"\nFrame Generation: includes one interpolation interval"
+                : L"\nFrame Generation: incluye un intervalo de interpolación";
+        }
         brush_->SetColor(D2D1::ColorF(0.93f, 0.97f, 1.0f, 1.0f));
         const D2D1_RECT_F textRect = D2D1::RectF(box.left + 12.0f * scale,
                                                 box.top + 7.0f * scale,
                                                 box.right - 8.0f * scale,
                                                 box.bottom - 5.0f * scale);
-        target_->DrawTextW(text, static_cast<UINT32>(wcslen(text)), format, textRect, brush_,
+        target_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), format, textRect, brush_,
                            D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
     }
 
@@ -331,10 +347,10 @@ private:
         wchar_t values[300]{};
         _snwprintf_s(values, _countof(values), _TRUNCATE,
             stats.english
-                ? L"Input %.2f ms   Jitter %.2f ms   Queue %u/1   Governor drops %llu\nGPU %.2f ms   Present %.2f ms   Range %.2f-%.2f ms"
-                : L"Entrada %.2f ms   Jitter %.2f ms   Cola %u/1   Descartes del governor %llu\nGPU %.2f ms   Presentación %.2f ms   Rango %.2f-%.2f ms",
+                ? L"Input %.2f ms   Jitter %.2f ms   Queue %u/1   Governor drops %llu\nGPU %.2f ms   OFA %.2f ms   Present %.2f ms   Range %.2f-%.2f ms"
+                : L"Entrada %.2f ms   Jitter %.2f ms   Cola %u/1   Descartes del governor %llu\nGPU %.2f ms   OFA %.2f ms   Presentación %.2f ms   Rango %.2f-%.2f ms",
             stats.frameIntervalMs, stats.frameJitterMs, stats.queueDepth,
-            stats.governorDiscardedFrames, stats.processingMs, stats.presentMs,
+            stats.governorDiscardedFrames, stats.processingMs, stats.opticalFlowMs, stats.presentMs,
             stats.frameMinimumMs, stats.frameMaximumMs);
         brush_->SetColor(D2D1::ColorF(0.88f, 0.92f, 0.97f, 0.96f));
         D2D1_RECT_F valuesRect = D2D1::RectF(box.left + 13.0f * scale, box.top + 31.0f * scale,

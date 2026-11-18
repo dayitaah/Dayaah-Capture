@@ -10,6 +10,9 @@ struct ModeCandidate {
     uint32_t height = 0;
     double fps = 0;
     int format = 0;
+    // En formatos comprimidos no existe un bytes-por-pixel fijo. Si el driver
+    // anuncia MF_MT_AVG_BITRATE lo convertimos a MiB/s y lo guardamos aqui.
+    double estimatedMegabytesPerSecond = 0.0;
 };
 
 enum class ModeAxis { Resolution, Fps, Format };

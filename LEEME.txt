@@ -1,4 +1,6 @@
-Dayaah Capture 2.0.1 - Windows x64
+Dayaah Capture 3.4.1 - Windows x64
+Esta compilación sigue siendo BETA.
+La versión estable recomendada sigue siendo Dayaah Capture 2.2.0.
 
 1. Extrae el ZIP completo en una carpeta nueva.
 2. Ejecuta DayaahCapture.exe.
@@ -7,21 +9,80 @@ Dayaah Capture 2.0.1 - Windows x64
    directamente al visor en este equipo.
 5. Usa clic derecho > Configuración... para volver a la pantalla inicial.
 
+AMD AMF FRC (opcional, nuevo en 3.4.0):
+- Rendimiento, Calidad y Máxima usan el interpolador de video oficial del
+  controlador Radeon para presentar hasta 2x FPS.
+- No necesita un runtime dentro del ZIP: carga amfrt64.dll desde el driver AMD.
+- Si el hardware o el componente FRC no son compatibles, Dayaah lo registra y
+  continúa automáticamente por la ruta normal.
+- FutureFrame está apagado para no sumar un tercer cuadro de latencia.
+
+NVIDIA VFG (opcional, nuevo en 3.3.0):
+- Bajo, Medio y Alto usan el modelo neural oficial NVIDIA VFG para generar el
+  punto medio de cada pareja y presentar hasta 2x FPS.
+- El ZIP normal no incluye el runtime propietario. El ZIP NVIDIA-VFG lo guarda
+  en runtime\nvidia-vfg junto con las licencias originales de NVIDIA.
+- Requiere una GPU Ada/Blackwell compatible y un driver reciente. Para probar
+  30->60 en la RTX 5070 empieza por NVIDIA VFG · Medio.
+- Si el runtime o la GPU no están disponibles, la captura sigue por la ruta normal.
+
+Frame Generation NVIDIA OFA (opcional):
+- Desactivado conserva la ruta normal y la menor latencia.
+- Rendimiento, Equilibrado y Calidad generan un frame intermedio para hasta 2x FPS.
+- Dayaah Line Cleaner se activa en Equilibrado/Calidad para limpiar contornos y
+  zonas descubiertas; Rendimiento conserva la ruta más ligera.
+- 3.2.2 reconstruye con la primera pareja forward/backward y elimina la segunda
+  consulta desplazada que podía cambiar del objeto al fondo y cortar la imagen.
+- 3.2.3 evita el crossfade temporal: solo promedia proyecciones que coinciden y
+  conserva una fuente nítida cuando hay oclusión o desacuerdo.
+- 3.2.4 elimina la selección dura por bloques observada en hardware y proyecta
+  ambos frames con una sola trayectoria simétrica atenuada por confianza.
+- Requiere GPU NVIDIA Turing o más nueva, driver compatible y Windows 10/11.
+- No es DLSS: trabaja con los frames HDMI y añade aproximadamente un intervalo
+  de la señal. Para 60->120 se recomienda una pantalla de 120 Hz o más.
+- Mientras está activo pausa efectos y Disco RGB, pero conserva sus ajustes.
+- Si OFA no está disponible, la captura continúa automáticamente por la ruta normal.
+
+Diagnóstico 3.2.1/3.2.4 (solo para investigar Frame Generation):
+- DAYAAH_FG_BYPASS=7: atlas 2x2 de forward, backward y ambos costos.
+- DAYAAH_FG_BYPASS=8: warp forward a la izquierda y backward a la derecha.
+Ambos escriben FGFLOW una vez por segundo en DayaahCapture.log. Sin la variable,
+el programa usa la ruta normal. Los bypasses 1-6 antiguos siguen disponibles
+solo para reproducir la prueba de 3.2.0.
+
 Atajos:
 F6  Efectos de video
 F7  Panel de nitidez, color y CRT
 F8  Latencia real aproximada
+F9  Osciloscopio de frame pacing
 F10 Overlays
 F11 Pantalla completa
+F12 Picture in Picture
 M   Silencio
 
-Formatos: NV12 y YUY2; XRGB de alto ancho de banda; I420 con conversión CPU;
-P010 de 10 bits y compatibilidad limitada. La aplicación solo muestra los
-modos anunciados por la capturadora y enseña su posible penalización.
+PiP crea una ventana compacta, siempre visible, movible y redimensionable.
+Recuerda su posición y tamaño. Pausa temporalmente los efectos para ahorrar GPU
+y los restaura al salir; overlays, mira, telemetría y audio siguen activos.
+
+Formatos crudos: NV12, YUY2, XRGB, I420 y P010. La casilla opcional de
+compatibilidad muestra MJPEG/H.264, que requieren decoder y pueden añadir
+latencia o uso de CPU/GPU. "Buscar de nuevo" actualiza dispositivos y modos.
+
+AUTO-OPTIMIZAR evalúa los modos disponibles, siempre prefiere uno crudo y solo
+usa un formato comprimido como fallback. Selecciona el mejor
+candidato y lo valida durante cinco segundos. Phoenix intenta recuperar video
+y audio hasta tres veces si la señal o el lector dejan de entregar frames. Si
+falla, abre Configuración mediante un proceso nuevo para no dejar audio ni el
+último fotograma de la sesión anterior.
 
 La cifra de F8 es una estimación, no una medición con sensor. Considera FPS,
 edad del cuadro, presentación y VSync; no puede medir exactamente el panel
 conectado al PS5.
+En MJPEG/H.264 tampoco incluye toda la latencia interna de la capturadora y
+del decoder; el HUD muestra esa advertencia.
+
+LATENCIA MÍNIMA (NO VSYNC - VRR) usa la ruta DXGI compatible con VRR. Requiere
+una pantalla/GPU compatible y VRR habilitado en Windows o el controlador.
 
 La huella local de primera ejecución es un hash guardado en DayaahCapture.ini.
 No se envía a internet ni funciona como DRM. Al mover ZIP+INI a otro equipo,

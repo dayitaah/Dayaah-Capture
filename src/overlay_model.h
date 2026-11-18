@@ -63,9 +63,12 @@ struct OverlayStats {
     double sourceFps = 0.0;
     std::wstring format;
     bool lowLatency = true;
+    bool compressedPath = false;
+    bool frameGeneration = false;
     std::uint32_t approximateLatencyMs = 0;
     double processingMs = 0.0;
     double presentMs = 0.0;
+    double opticalFlowMs = 0.0;
     double frameIntervalMs = 0.0;
     double frameJitterMs = 0.0;
     double frameMinimumMs = 0.0;

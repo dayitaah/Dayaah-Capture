@@ -26,6 +26,17 @@ int main() {
     assert(decision.estimatedMegabytesPerSecond > 170.0);
     assert(decision.estimatedMegabytesPerSecond < 190.0);
 
+    const std::vector<ModeCandidate> mixedModes = {
+        {3840, 2160, 120.0, 6, 110.0},
+        {1920, 1080, 60.0, 1, 0.0},
+    };
+    assert(SelectAutoTuneMode(mixedModes, {3840, 2160, 120.0}).index == 1);
+    const std::vector<ModeCandidate> compressedOnly = {
+        {1920, 1080, 60.0, 7, 8.0},
+        {3840, 2160, 60.0, 6, 65.0},
+    };
+    assert(SelectAutoTuneMode(compressedOnly, {1920, 1080, 60.0}).index == 0);
+
     const CadenceMismatch mismatch = DetectCadenceMismatch(60000.0 / 1001.0, 60.0, true);
     assert(mismatch.visible);
     assert(mismatch.repeatEverySeconds > 16.0 && mismatch.repeatEverySeconds < 17.5);

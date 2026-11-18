@@ -106,7 +106,13 @@ inline double FormatBytesPerPixel(int format) {
     if (format == 2) return 2.0;                // YUY2
     if (format == 4) return 3.0;                // P010
     if (format == 5) return 4.0;                // XRGB
-    return 8.0;
+    if (format == 6) return 0.35;               // MJPEG: solo fallback si no hay bitrate.
+    if (format == 7) return 0.12;               // H.264: solo fallback si no hay bitrate.
+    return 0.0;
+}
+
+inline bool IsRawFormatCode(int format) {
+    return format >= 1 && format <= 5;
 }
 
 inline double AutoTuneFormatScore(int format) {
@@ -115,6 +121,8 @@ inline double AutoTuneFormatScore(int format) {
     if (format == 5) return 250.0; // XRGB: sin croma, pero se come el USB sabroso.
     if (format == 4) return 210.0; // P010: 10 bits utiles, caros para un viewer SDR.
     if (format == 3) return 170.0; // I420: requiere reacomodar U/V por CPU.
+    if (format == 6) return 80.0;  // MJPEG: compatibilidad con decoder normalmente CPU.
+    if (format == 7) return 20.0;  // H.264: util para hardware viejo, latencia variable.
     return -1000.0;
 }
 
@@ -123,14 +131,21 @@ inline AutoTuneDecision SelectAutoTuneMode(const std::vector<ModeCandidate>& mod
     AutoTuneDecision best{};
     const double targetPixels = std::max(1.0, static_cast<double>(requested.width) * requested.height);
     const double targetHz = requested.refreshHz > 1.0 ? requested.refreshHz : 60.0;
+    const bool rawAvailable = std::any_of(modes.begin(), modes.end(), [](const ModeCandidate& mode) {
+        return mode.width && mode.height && mode.fps >= 1.0 && IsRawFormatCode(mode.format);
+    });
     for (std::size_t i = 0; i < modes.size(); ++i) {
         const ModeCandidate& mode = modes[i];
         if (!mode.width || !mode.height || mode.fps < 1.0) continue;
+        // AutoTune no manda a la usuaria por un decoder si existe aunque sea un
+        // modo crudo utilizable. Los comprimidos son fallback, no la ruta reina.
+        if (rawAvailable && !IsRawFormatCode(mode.format)) continue;
         const double pixels = static_cast<double>(mode.width) * mode.height;
         const double resolutionError = std::fabs(std::log2(pixels / targetPixels));
         const double fpsError = std::fabs(mode.fps - targetHz);
-        const double bandwidth = pixels * mode.fps * FormatBytesPerPixel(mode.format) /
-                                 (1024.0 * 1024.0);
+        const double bandwidth = mode.estimatedMegabytesPerSecond > 0.0
+            ? mode.estimatedMegabytesPerSecond
+            : pixels * mode.fps * FormatBytesPerPixel(mode.format) / (1024.0 * 1024.0);
 
         double score = AutoTuneFormatScore(mode.format);
         score += 900.0 - resolutionError * 430.0;

@@ -1,6 +1,6 @@
-<p align="right"><a href="README.es.md">Español</a> · <strong>English</strong></p>
+<p align="right"><a href="LEEME.md">Español</a> · <strong>English</strong></p>
 <p align="center">
-  <img src="assets/dayaah-capture-icon.png" width="180" alt="Dayaah Capture">
+  <img src="src/DayaahCapture-icon.png" width="180" alt="Dayaah Capture">
 </p>
 
 <h1 align="center">Dayaah Capture</h1>
@@ -10,16 +10,16 @@
 </p>
 
 <p align="center">
-  <img alt="Version 2.2.0" src="https://img.shields.io/badge/version-2.2.0-53D7B2">
-  <img alt="Windows 10 y 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
+  <img alt="Version 3.4.1 Beta" src="https://img.shields.io/badge/version-3.4.1%20BETA-D89C36">
+  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4">
   <img alt="C++17" src="https://img.shields.io/badge/C%2B%2B-17-00599C">
-  <img alt="Licencia MIT" src="https://img.shields.io/badge/license-MIT-53D7B2">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-53D7B2">
 </p>
 
 
 # Dayaah Capture
 
-**English** · [Español](README.es.md)
+**English** · [Español](LEEME.md)
 
 Native ultra-low-latency HDMI capture card viewer for Windows 10/11 x64.
 
@@ -28,38 +28,32 @@ only the newest frame, and presents it through D3D11. Capture-card audio is
 played through WASAPI in the same process. No MPV, FFmpeg, installer, account,
 or background service is required.
 
-The current stable release is **v2.2.0**.
-PD: If you want beta releases send me message on my discord @dayaah
+This source package is **3.4.1 Beta**. The recommended stable release is
+**2.2.0**. For beta releases and feedback, contact `@dayaah` on Discord.
+
 ## Features
 
 - Native capture through Windows Media Foundation.
-- Raw NV12,YUY2,XRGB,P010 video with no recompression.
-- I420 video uses CPU into NV12
-- D3D11 Video Processor color conversion and scaling.
-- Dedicated render thread separated from the window interface.
-- Latest-frame-only queue to prevent latency from accumulating.
-- Minimum-latency presentation mode with tearing allowed.
-- Optional VSync with a maximum one-frame queue.
-- WASAPI audio capture and playback in the same process.
-- Selectable audio gain: 0, +6, +12, +15, or +18 dB.
-- Automatic enumeration of devices, resolutions, frame rates, and formats.
-- Fullscreen mode, quick mute, and reliable automatic cursor hiding.
-- Local INI configuration that remembers the last selected options.
-- New Dayaah Autotune for automatic setup
-- New Latency Gorvernor prevents old frames from showing up
-- New Phoenix Recovery for unstable capture cards
-- New frame-pacing osciloscope with 120 frames of window
-- New Picture-in-Picture option that shows the viewer Always on Top and is rezizable
-  
+- Raw NV12, YUY2, XRGB, I420 and P010, with optional MJPEG/H.264 compatibility.
+- D3D11 Video Processor for color conversion and scaling.
+- Dedicated render thread and a latest-frame-only capture buffer.
+- Minimum latency with tearing/VRR support, plus optional VSync.
+- WASAPI audio capture and playback, with 0, +6, +12, +15 or +18 dB gain.
+- Dayaah AutoTune, Latency Governor and Phoenix Recovery.
+- Frame Pacing Scope with a 120-frame graph and an approximate latency HUD.
+- Picture in Picture, fullscreen, quick mute and automatic cursor hiding.
+- Local settings, overlays, crosshair and optional video effects.
+- Experimental 2× video interpolation with NVIDIA OFA, NVIDIA VFG or AMD AMF FRC.
+
 ## Download and use
 
-1. Open the [latest release](https://github.com/dayitaah/Dayaah-Capture/releases/latest).
-2. Download the Windows x64 ZIP.
-3. Extract the complete folder.
-4. Run `DayaahCapture.exe`.
-5. Select your capture card, video mode, audio input, gain, and presentation
-   mode.
-6. Click **INICIAR CAPTURA**.
+1. For the stable build, open the [latest release](https://github.com/dayitaah/Dayaah-Capture/releases/latest).
+   If you already have the beta, use its regular Windows x64 ZIP, or the
+   separately labeled `NVIDIA-VFG` ZIP to try NVIDIA Video Frame Generation.
+2. Extract the complete Windows ZIP into its own folder.
+3. Run `DayaahCapture.exe`.
+4. Select your capture card, video mode, audio input, gain and presentation mode.
+5. Click **Start capture**.
 
 Recommended starting point for the UGREEN 25173:
 
@@ -67,23 +61,19 @@ Recommended starting point for the UGREEN 25173:
 1920 x 1080 - 60 fps - NV12
 HDMI (UGREEN 25173)
 +15 dB
-Minimum latency (tearing may occur)
+Minimum latency (No VSync - VRR)
 ```
 
 ## Compatibility
 
-Dayaah Capture is not locked to one capture-card brand. It lists video devices
-exposed by Windows Media Foundation when they provide raw NV12, YUY2, XRGB, I420 and P010
-output.
+Dayaah Capture lists devices exposed by Windows Media Foundation. Raw video is
+the default. Enable **MJPEG/H.264 (compressed compatibility)** to see those
+modes, including on cards that expose only compressed output. **Rescan**
+refreshes capture devices, audio inputs and modes without restarting.
 
-Devices that expose only MJPEG, H.264, or another compressed format will not be
-listed. Staying on the raw path avoids hidden decode and conversion stages and
-keeps latency predictable.
-
-The capture card's audio must appear as a separate recording device in Windows.
-Audio is sent to the current default playback device.
-
-Only one application can use some capture devices at a time.
+The capture card's audio must appear as a Windows recording device. Audio is
+sent to the default playback device. Some cards can be used by only one
+application at a time.
 
 ## Controls
 
@@ -104,7 +94,7 @@ Only one application can use some capture devices at a time.
 
 The hidden RGB effect displays its active state in the window title and reports
 when the GPU cannot support the required hue filter.
-Type DISCO to activate it while the viewer is running
+Type `DISCO` to activate it while the viewer is running.
 
 Open the editor from the context menu. Its canvas is a viewer for arranging
 layers. Internal statistics cover received and presented FPS, discarded frames,
@@ -115,6 +105,9 @@ and reloads at startup. Keep that file when updating and retain PNGs at their
 original paths. Opacity and size update while typing; closing the editor returns
 focus to capture without changing its window state.
 
+`F8` estimates latency from capture timing, frame age and presentation.
+It cannot include all encoder and decoder delay for MJPEG/H.264.
+
 ## Video formats
 
 | Format | Path | Note |
@@ -124,20 +117,47 @@ focus to capture without changing its window state.
 | XRGB | Direct GPU | 4 bytes per pixel; potentially high penalty |
 | I420 | CPU conversion to NV12 | May increase CPU load |
 | P010 | 10-bit GPU | Limited compatibility; does not enable HDR by itself |
+| MJPEG | Media Foundation decoder | Compressed; may add CPU work and latency |
+| H.264 | Media Foundation with DXVA or software decoding | Compressed; latency varies by device |
 
-Only modes advertised by the capture device are shown. If a live change is
-rejected, the application attempts to restore the previous mode.
+Only modes advertised by the capture device are shown. AutoTune prefers raw
+video and uses compressed modes when no raw option is usable. If a live mode
+change fails, Dayaah Capture tries to restore the previous mode.
 
 ## Presentation modes
 
 | Mode | Behavior |
 | --- | --- |
-| Minimum latency | Presents immediately; a tearing line may appear |
-| VSync | Removes tearing; may add up to one display refresh interval |
+| Minimum latency (No VSync - VRR) | Presents without VSync and allows tearing when supported. VRR requires a compatible display and GPU with VRR enabled. |
+| VSync | Synchronizes presentation to the display refresh; can add presentation delay. |
 
 ## What is included in new versions
 
-## 2.2.0
+### 3.4.1 Beta
+
+- Fixed live capture-mode changes such as 1080p30 → 1080p60 that could fail with
+  `E_ACCESSDENIED` after using NVIDIA VFG. The renderer releases the previous
+  DXGI swap chain with a bounded GPU wait and short retries when needed.
+- Includes optional MJPEG/H.264 support and the three experimental
+  interpolation backends introduced in previous betas.
+
+| Frame Generation backend | Options | Requirements |
+| --- | --- | --- |
+| NVIDIA OFA | Performance, Balanced, Quality | Compatible NVIDIA Turing or newer GPU and a driver with `nvofapi64.dll` |
+| NVIDIA VFG | Low, Medium, High | Compatible NVIDIA Ada or Blackwell GPU and driver. The separate `NVIDIA-VFG` ZIP includes NVIDIA VFX 0.2.0.0 under `runtime/nvidia-vfg` with its licenses. |
+| AMD AMF FRC | Performance, Quality, Maximum | Compatible Radeon GPU and driver with `amfrt64.dll` and FRC support |
+
+Frame Generation creates one intermediate frame per pair for up to 2×
+presentation FPS. It adds about one source-frame interval. Use **Off** for
+the lowest latency, and a 120 Hz or faster display for 60 → 120 FPS. If the
+selected backend is unavailable, capture continues normally. Interpolation
+pauses video effects and Disco RGB while keeping audio, overlays and the
+crosshair available.
+
+The regular ZIP and Source ZIP omit the proprietary VFG runtime. For a
+first 30 → 60 FPS test with the NVIDIA-VFG package, start with **Medium**.
+
+### 2.2.0 (stable)
 
 - Added F12 Picture in Picture: borderless, always on top, movable and resizable, with persistent size and position. Effects pause automatically while overlays, crosshair, audio and telemetry remain available.
 - Renamed the fast path to Minimum latency (No VSync - VRR), using tearing support when available.
@@ -157,9 +177,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the complete release notes.
 ```text
 UVC capture card
   -> Media Foundation Source Reader (asynchronous, low latency)
+  -> Media Foundation decode (if MJPEG/H.264 is selected)
   -> newest-frame buffer
-  -> NV12/YUY2/XRGB/I420/P010 D3D11 texture
-  -> D3D11 Video Processor
+  -> D3D11 upload and Video Processor
+  -> optional Frame Generation
   -> flip-model swap chain
 
 Capture-card audio
@@ -168,9 +189,9 @@ Capture-card audio
   -> WASAPI render
 ```
 
-The video queue never grows: a newly received frame replaces any older frame
-that has not been presented yet. This is the central rule that prevents the
-preview from slowly falling behind the live signal.
+In the normal capture path, each new frame replaces the previous pending frame.
+Optional Frame Generation keeps the neighboring real frames it needs to create an
+intermediate frame.
 
 ## Build on Windows
 
@@ -179,10 +200,10 @@ with C++**, and a Windows SDK.
 
 1. Open **x64 Native Tools Command Prompt for VS 2022**.
 2. Enter the project directory.
-3. Run `src\build-msvc.bat`.
+3. Run `build.bat`. The executable is written to `build\DayaahCapture.exe`.
 
-The resulting executable is written to the project root as
-`DayaahCapture.exe`
+For the reproducible Linux cross-build with LLVM-MinGW, see
+[TOOLCHAIN.md](TOOLCHAIN.md).
 
 ## Reporting bugs
 
@@ -190,30 +211,32 @@ Open a [GitHub Issue](https://github.com/dayitaah/Dayaah-Capture/issues) and
 attach `DayaahCapture.log`. Include:
 
 - Dayaah Capture version.
-- Windows version and GPU.
+- Windows version, GPU and driver version.
 - Capture-card model and connection type.
-- Selected resolution, frame rate, and pixel format.
+- Selected resolution, frame rate, pixel format, presentation mode and Frame Generation preset.
 - Exact steps needed to reproduce the problem.
 
-Copy the log before launching Dayaah Capture again because a new log is created
-on every run.
+Copy the log before relaunching. Normal launches rotate the previous log to
+`DayaahCapture.log.1`.
 
 ## Current constraints
 
 - Windows x64 only.
 - +15 and +18 dB may clip an already loud input signal.
-- Not tested HDR Compatibility
+- P010 support does not establish HDR compatibility.
+- Compressed capture and Frame Generation can add delay. For minimum latency,
+  start with raw NV12 and Frame Generation off.
 
 ## Privacy
 
-Dayaah Capture works locally. It contains no telemetry, advertising, accounts,
-analytics, or network connections.
-https://www.virustotal.com/gui/file/451ebf839a384bed25229b396e2857d14cf4fc75173869fd6768f1bd2f591e58?nocache=1
+Capture settings, the first-run device hash and diagnostic logs stay local.
+The hash is stored in `DayaahCapture.ini`. The viewer does not require an
+account, send analytics or upload diagnostic data.
 
 ## Contributing
 
 Bug reports and improvements are welcome in English or Spanish. Read
-[CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
+[CONTRIBUTING.md](https://github.com/dayitaah/Dayaah-Capture/blob/main/CONTRIBUTING.md) before submitting a change.
 
 ## Support Dayaah Capture
 
@@ -226,4 +249,5 @@ development on Ko-fi:
 
 ## License
 
-Released under the [MIT License](LICENSE). Copyright © 2026 Dayaah.
+Released under the [MIT License](LICENSE.txt). Copyright © 2026 Dayaah.
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the AMD and NVIDIA terms.

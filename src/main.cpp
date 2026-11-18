@@ -27,22 +27,28 @@
 #include <propvarutil.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdarg>
 #include <deque>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include "disco_effect.h"
 #include "disco_secret.h"
+#include "frame_generation_telemetry.h"
 #include "latency_estimator.h"
 #include "localization.h"
 #include "machine_identity.h"
 #include "mode_selection.h"
+#include "frame_generator_router.h"
 #include "overlay_editor.h"
 #include "overlay_renderer.h"
 #include "performance_telemetry.h"
@@ -50,6 +56,11 @@
 #include "video_effects_editor.h"
 #include "video_effects_renderer.h"
 #include "video_effects_settings.h"
+
+// Algunos headers de MinGW aun no traen esta bandera (Windows 10 1803+).
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 // ============================================================================
 // Dayaah Capture, explicado sin hablar como manual de licuadora
@@ -64,9 +75,11 @@
 // ============================================================================
 
 constexpr UINT WM_DAYAAH_EFFECTS_ERROR = WM_APP + 19;
+constexpr UINT WM_DAYAAH_COMPAT_FAILURE = WM_APP + 20;
+constexpr UINT WM_DAYAAH_FRAMEGEN_ERROR = WM_APP + 21;
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 
-inline constexpr const wchar_t* kAppTitle = L"Dayaah Capture 2.2.0";
+inline constexpr const wchar_t* kAppTitle = L"Dayaah Capture 3.4.1";
 inline constexpr const wchar_t* kGithubUrl = L"https://github.com/dayitaah/Dayaah-Capture";
 inline constexpr const wchar_t* kKofiUrl = L"https://ko-fi.com/dayaah";
 
@@ -191,6 +204,7 @@ static std::wstring GuidFormatName(const GUID& subtype) {
     if (subtype == MFVideoFormat_I420) return L"I420";
     if (subtype == MFVideoFormat_P010) return L"P010";
     if (subtype == MFVideoFormat_MJPG) return L"MJPEG";
+    if (subtype == MFVideoFormat_H264) return L"H.264";
     if (subtype == MFVideoFormat_RGB32) return L"XRGB";
     return L"Otro";
 }
@@ -199,6 +213,14 @@ static bool SupportedRawSubtype(const GUID& subtype) {
     return subtype == MFVideoFormat_NV12 || subtype == MFVideoFormat_YUY2 ||
            subtype == MFVideoFormat_I420 || subtype == MFVideoFormat_P010 ||
            subtype == MFVideoFormat_RGB32;
+}
+
+static bool CompressedSubtype(const GUID& subtype) {
+    return subtype == MFVideoFormat_MJPG || subtype == MFVideoFormat_H264;
+}
+
+static bool SupportedCaptureSubtype(const GUID& subtype) {
+    return SupportedRawSubtype(subtype) || CompressedSubtype(subtype);
 }
 
 static DXGI_FORMAT RendererFormat(const GUID& subtype) {
@@ -240,8 +262,65 @@ static const wchar_t* FormatNotice(const GUID& subtype, AppLanguage language) {
     if (subtype == MFVideoFormat_P010) return Tr(language,
         L"10 bits: más ancho de banda y compatibilidad limitada; no activa HDR por sí solo.",
         L"10-bit: higher bandwidth and limited compatibility; it does not enable HDR by itself.");
+    if (subtype == MFVideoFormat_MJPG) return Tr(language,
+        L"MJPEG comprimido: el decoder puede aumentar la latencia y el uso de CPU.",
+        L"Compressed MJPEG: decoding may increase latency and CPU use.");
+    if (subtype == MFVideoFormat_H264) return Tr(language,
+        L"H.264 comprimido: la capturadora y el decoder pueden añadir latencia.",
+        L"Compressed H.264: the capture device and decoder may add latency.");
     return L"";
 }
+
+enum class FormatValidation {
+    Valid,
+    Invalid,
+    Unknown
+};
+
+enum class DecodeBackend {
+    Raw,
+    Hardware,
+    Software
+};
+
+enum class CompatFailureReason {
+    ModeIncompatible,
+    RetrySoftwareDecoder
+};
+
+enum class MediaTypeChangeAction {
+    Continue,
+    Phoenix,
+    Stop
+};
+
+struct DecodedFormat {
+    GUID subtype{};
+    UINT32 codedWidth = 0;
+    UINT32 codedHeight = 0;
+    UINT32 visibleWidth = 0;
+    UINT32 visibleHeight = 0;
+    UINT32 apertureX = 0;
+    UINT32 apertureY = 0;
+    LONG stride = 0;
+    bool apertureSpecified = false;
+};
+
+struct PublishedFrameDescriptor {
+    GUID sourceSubtype{};
+    GUID rendererSubtype{};
+    UINT32 width = 0;
+    UINT32 height = 0;
+    LONG stride = 0;
+    bool compressed = false;
+};
+
+struct PendingCaptureFailure {
+    std::uint64_t sessionId = 0;
+    CompatFailureReason reason = CompatFailureReason::ModeIncompatible;
+    HRESULT hr = E_FAIL;
+    std::wstring detail;
+};
 
 // Un VideoMode es una combinacion REAL anunciada por la capturadora. No
 // inventamos 1080p120 porque se vea bonito en el menu: si el driver no lo
@@ -253,6 +332,9 @@ struct VideoMode {
     UINT32 fpsDen = 1;
     GUID subtype{};
     DWORD nativeIndex = 0;
+    UINT32 averageBitrate = 0;
+
+    bool IsCompressed() const { return CompressedSubtype(subtype); }
 
     double Fps() const {
         return fpsDen ? static_cast<double>(fpsNum) / static_cast<double>(fpsDen) : 0.0;
@@ -283,6 +365,7 @@ struct VideoDeviceInfo {
     std::wstring name;
     IMFActivate* activate = nullptr;
     std::vector<VideoMode> modes;
+    HRESULT enumerationError = S_OK;
 };
 
 struct AudioDeviceInfo {
@@ -293,6 +376,10 @@ struct AudioDeviceInfo {
 struct RenderTiming {
     double processingMs = 0.0;
     double presentMs = 0.0;
+    double opticalFlowMs = 0.0;
+    std::uint32_t presents = 1;
+    bool generatedFrame = false;
+    FrameGenSample fg;  // diagnostico de FG; solo se agrega si DAYAAH_FG_TELEMETRY=1
 };
 
 struct ViewerNotice {
@@ -309,7 +396,8 @@ public:
     ~D3DVideoRenderer() { Shutdown(); }
 
     HRESULT Initialize(HWND window, UINT32 inputWidth, UINT32 inputHeight,
-                       const GUID& subtype, bool lowLatency, bool inputFullRange) {
+                       const GUID& subtype, bool lowLatency, bool inputFullRange,
+                       FrameGenerationMode frameGeneration, double sourceFps) {
         Shutdown();
         window_ = window;
         inputWidth_ = inputWidth;
@@ -319,6 +407,22 @@ public:
         if (inputFormat_ == DXGI_FORMAT_UNKNOWN) return MF_E_UNSUPPORTED_D3D_TYPE;
         lowLatency_.store(lowLatency);
         inputFullRange_.store(inputFullRange);
+        requestedFrameGeneration_ = frameGeneration;
+        sourceFrameIntervalMs_ = sourceFps > 1.0 ? 1000.0 / sourceFps : 16.6667;
+        fgTelemetry_ = frameGeneration != FrameGenerationMode::Off &&
+                       (FrameGenEnvFlag(L"DAYAAH_FG_TELEMETRY") ||
+                        FrameGenBypassUsesStableFlow(FrameGenBypassMode()));
+        lastPresentQpc_ = 0;
+        lastPresentStatsValid_ = false;
+        if (frameGeneration != FrameGenerationMode::Off) {
+            // Sin timeBeginPeriod, Sleep() duerme en saltos de 15.6 ms en Windows 10/11.
+            // Un timer de alta resolucion da ~0.5 ms sin tocar la configuracion global.
+            paceTimer_ = CreateWaitableTimerExW(nullptr, nullptr,
+                                                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                TIMER_ALL_ACCESS);
+            LogLine(L"FG pacing: timer de alta resolucion %s",
+                    paceTimer_ ? L"disponible" : L"NO disponible (espera activa)");
+        }
 
         UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
         D3D_FEATURE_LEVEL levels[] = {
@@ -326,14 +430,59 @@ public:
             D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0
         };
         D3D_FEATURE_LEVEL obtained{};
-        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
-                                       levels, _countof(levels), D3D11_SDK_VERSION,
-                                       &device_, &obtained, &context_);
-        if (hr == E_INVALIDARG) {
-            hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
-                                   levels + 1, _countof(levels) - 1, D3D11_SDK_VERSION,
-                                   &device_, &obtained, &context_);
+        auto createDevice = [&](IDXGIAdapter* adapter) {
+            const D3D_DRIVER_TYPE driver = adapter
+                ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+            HRESULT result = D3D11CreateDevice(
+                adapter, driver, nullptr, flags, levels, _countof(levels), D3D11_SDK_VERSION,
+                &device_, &obtained, &context_);
+            if (result == E_INVALIDARG) {
+                result = D3D11CreateDevice(
+                    adapter, driver, nullptr, flags, levels + 1, _countof(levels) - 1,
+                    D3D11_SDK_VERSION, &device_, &obtained, &context_);
+            }
+            return result;
+        };
+
+        // En laptops hibridas Windows puede escoger primero la integrada. Para
+        // FG buscamos explicitamente la marca pedida; asi AMF no recibe una
+        // RTX ni OFA/VFG reciben la Radeon equivocada.
+        IDXGIAdapter1* frameGenerationAdapter = nullptr;
+        const UINT requestedVendor = FrameGenerationIsAmdFrc(frameGeneration)
+            ? 0x1002u : 0x10DEu;
+        if (frameGeneration != FrameGenerationMode::Off) {
+            IDXGIFactory1* adapterFactory = nullptr;
+            if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&adapterFactory)))) {
+                SIZE_T bestDedicatedMemory = 0;
+                for (UINT index = 0;; ++index) {
+                    IDXGIAdapter1* candidate = nullptr;
+                    const HRESULT enumHr = adapterFactory->EnumAdapters1(index, &candidate);
+                    if (enumHr == DXGI_ERROR_NOT_FOUND) break;
+                    if (FAILED(enumHr) || !candidate) break;
+                    DXGI_ADAPTER_DESC1 adapterDesc{};
+                    if (SUCCEEDED(candidate->GetDesc1(&adapterDesc)) &&
+                        adapterDesc.VendorId == requestedVendor &&
+                        !(adapterDesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+                        (!frameGenerationAdapter ||
+                         adapterDesc.DedicatedVideoMemory >= bestDedicatedMemory)) {
+                        SafeRelease(frameGenerationAdapter);
+                        frameGenerationAdapter = candidate;
+                        bestDedicatedMemory = adapterDesc.DedicatedVideoMemory;
+                    } else {
+                        candidate->Release();
+                    }
+                }
+                adapterFactory->Release();
+            }
         }
+
+        HRESULT hr = frameGenerationAdapter ? createDevice(frameGenerationAdapter) : E_FAIL;
+        if (FAILED(hr)) {
+            SafeRelease(device_);
+            SafeRelease(context_);
+            hr = createDevice(nullptr);
+        }
+        SafeRelease(frameGenerationAdapter);
         if (FAILED(hr)) return hr;
 
         ID3D10Multithread* multithread = nullptr;
@@ -347,6 +496,13 @@ public:
         IDXGIFactory2* factory = nullptr;
         hr = device_->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
         if (SUCCEEDED(hr)) hr = dxgiDevice->GetAdapter(&adapter);
+        if (SUCCEEDED(hr) && adapter) {
+            DXGI_ADAPTER_DESC adapterDesc{};
+            if (SUCCEEDED(adapter->GetDesc(&adapterDesc))) {
+                LogLine(L"Adaptador D3D11: %s (vendor=0x%04X, device=0x%04X)",
+                        adapterDesc.Description, adapterDesc.VendorId, adapterDesc.DeviceId);
+            }
+        }
         if (SUCCEEDED(hr)) hr = adapter->GetParent(IID_PPV_ARGS(&factory));
         SafeRelease(dxgiDevice);
         SafeRelease(adapter);
@@ -387,14 +543,20 @@ public:
         desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         desc.Flags = allowTearing_ ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
-        hr = factory->CreateSwapChainForHwnd(device_, window_, &desc, nullptr, nullptr, &swapChain_);
+        hr = CreateSwapChainForWindow(factory, desc);
         if (SUCCEEDED(hr)) factory->MakeWindowAssociation(window_, DXGI_MWA_NO_ALT_ENTER);
         SafeRelease(factory);
         if (FAILED(hr)) return hr;
 
         IDXGISwapChain2* swap2 = nullptr;
         if (SUCCEEDED(swapChain_->QueryInterface(IID_PPV_ARGS(&swap2)))) {
-            swap2->SetMaximumFrameLatency(1);
+            const HRESULT latencyHr = swap2->SetMaximumFrameLatency(1);
+            if (FAILED(latencyHr)) {
+                // Se ignoraba este resultado. Si falla, la cola de presents sigue en el
+                // valor por defecto de DXGI (3 cuadros) y no el "1" que dice el comentario.
+                LogLine(L"IDXGISwapChain2::SetMaximumFrameLatency(1) devolvio %s",
+                        HrText(latencyHr).c_str());
+            }
             swap2->Release();
         }
 
@@ -403,8 +565,9 @@ public:
         if (SUCCEEDED(hr)) hr = overlayRenderer_.Initialize();
         if (FAILED(hr)) return hr;
 
-        // Esta textura recibe exactamente el formato nativo elegido. Evitamos
-        // que Media Foundation meta conversiones sorpresa por CPU.
+        // En ruta cruda recibe exactamente el formato nativo elegido. En la
+        // compatibilidad comprimida recibe la salida explícita NV12/YUY2 del
+        // decoder; nunca un formato sorpresa decidido a escondidas.
         D3D11_TEXTURE2D_DESC inputDesc{};
         inputDesc.Width = inputWidth_;
         inputDesc.Height = inputHeight_;
@@ -417,6 +580,35 @@ public:
         hr = device_->CreateTexture2D(&inputDesc, nullptr, &inputTexture_);
         if (FAILED(hr)) return hr;
 
+        if (frameGeneration != FrameGenerationMode::Off) {
+            const HRESULT frameGenHr = frameGenerator_.Initialize(
+                device_, context_, inputWidth_, inputHeight_, frameGeneration);
+            if (SUCCEEDED(frameGenHr)) {
+                const HRESULT processorHr = InitializeFrameGenerationProcessor();
+                if (FAILED(processorHr)) {
+                    frameGenerationFailure_ = L"El Video Processor rechazó las superficies de Frame Generation (" +
+                        frameGenerator_.SurfaceSummary() + L"): " + HrText(processorHr);
+                    ShutdownFrameGenerationProcessor();
+                    frameGenerator_.Shutdown();
+                } else if (frameGenerator_.IsAmdFrc()) {
+                    LogLine(L"AMD AMF FRC activo: %s, multiplicador=2x",
+                            frameGenerator_.SurfaceSummary().c_str());
+                } else if (frameGenerator_.IsVfg()) {
+                    LogLine(L"NVIDIA VFG activo: %s, multiplicador=2x, t=0.5",
+                            frameGenerator_.SurfaceSummary().c_str());
+                } else {
+                    LogLine(L"NVIDIA OFA superficies negociadas: %s",
+                            frameGenerator_.SurfaceSummary().c_str());
+                    LogLine(L"FG diagnostico: DAYAAH_FG_BYPASS=%d (%s), fuentes=%d",
+                            frameGenerator_.BypassMode(),
+                            FrameGenBypassName(frameGenerator_.BypassMode()),
+                            frameGenerator_.SourceTextureCount());
+                }
+            } else {
+                frameGenerationFailure_ = frameGenerator_.Error();
+            }
+        }
+
         const HRESULT effectsHr = effectsRenderer_.Initialize(device_);
         if (FAILED(effectsHr)) {
             LogLine(L"Shaders no disponibles: %s; %hs", HrText(effectsHr).c_str(),
@@ -425,10 +617,12 @@ public:
         }
         hr = RebuildVideoProcessor(width, height);
         if (SUCCEEDED(hr)) {
-            LogLine(L"D3D11 listo: entrada %ux%u %s, tearing=%s, disco RGB=%s",
+            LogLine(L"D3D11 listo: entrada %ux%u %s, tearing=%s, disco RGB=%s, FG=%s",
                     inputWidth_, inputHeight_, GuidFormatName(subtype).c_str(),
                     allowTearing_ ? L"si" : L"no",
-                    hueFilterSupported_.load() ? L"si" : L"no");
+                    hueFilterSupported_.load() ? L"si" : L"no",
+                    frameGenerator_.Active() ? L"activo" :
+                    (frameGeneration == FrameGenerationMode::Off ? L"apagado" : L"no disponible"));
         }
         return hr;
     }
@@ -437,6 +631,7 @@ public:
         if (!swapChain_ || width < 16 || height < 16) return S_OK;
         overlayRenderer_.BeforeResize();
         effectsRenderer_.BeforeResize();
+        frameGenerator_.BeforeResize();
         SafeRelease(outputView_);
         SafeRelease(inputView_);
         SafeRelease(processor_);
@@ -451,7 +646,7 @@ public:
     HRESULT Render(const BYTE* data, size_t size, LONG sourceStride,
                    const std::shared_ptr<const OverlayConfig>& overlayConfig,
                    const OverlayStats& overlayStats, const VideoEffects& effects,
-                   bool latencyHud, RenderTiming* timing) {
+                   bool sourceChanged, bool latencyHud, RenderTiming* timing) {
         if (!data || !inputTexture_ || !processor_ || !outputView_) return E_POINTER;
         LARGE_INTEGER frequency{};
         LARGE_INTEGER processingStarted{};
@@ -473,13 +668,34 @@ public:
         }
         if (size < expected || sourceStride != static_cast<LONG>(rowPitch)) return MF_E_BUFFERTOOSMALL;
 
-        // Subimos el frame a la textura. De aqui en adelante el trabajo queda
-        // en la GPU: conversion de color, escalado, efectos y overlays.
-        context_->UpdateSubresource(inputTexture_, 0, nullptr, data, rowPitch,
-                                    static_cast<UINT>(expected));
+        // En un redraw de animacion el frame no cambio. FG conserva sus
+        // texturas y solo volvemos a pintar overlays; no inventamos otra pareja
+        // de movimiento con dos copias del mismo frame.
+        if (sourceChanged || !frameGenerator_.HasCurrent()) {
+            context_->UpdateSubresource(inputTexture_, 0, nullptr, data, rowPitch,
+                                        static_cast<UINT>(expected));
+        }
 
         ApplyColorSpace();
         ApplyDiscoEffect();
+
+        if (frameGenerator_.Active()) {
+            const HRESULT frameGenHr = RenderWithFrameGeneration(
+                overlayConfig, overlayStats, sourceChanged, latencyHud, timing,
+                frequency, processingStarted);
+            if (SUCCEEDED(frameGenHr) || frameGenHr == DXGI_STATUS_OCCLUDED) return frameGenHr;
+
+            frameGenerationFailure_ = frameGenerator_.Error().empty()
+                ? L"La ruta Frame Generation fallo durante la presentacion."
+                : frameGenerator_.Error();
+            LogLine(L"Frame Generation desactivado en caliente: %s; %s",
+                    HrText(frameGenHr).c_str(), frameGenerationFailure_.c_str());
+            ShutdownFrameGenerationProcessor();
+            frameGenerator_.Shutdown();
+            PostMessageW(window_, WM_DAYAAH_FRAMEGEN_ERROR, 0, static_cast<LPARAM>(frameGenHr));
+            // El frame ya esta en inputTexture_. Caemos a la ruta normal en el
+            // mismo ciclo para que un problema de OFA no deje pantalla negra.
+        }
 
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
@@ -519,6 +735,9 @@ public:
             timing->presentMs = static_cast<double>(presentFinished.QuadPart -
                                                      processingFinished.QuadPart) *
                                 1000.0 / static_cast<double>(frequency.QuadPart);
+            timing->opticalFlowMs = 0.0;
+            timing->presents = 1;
+            timing->generatedFrame = false;
         }
         return presentHr;
     }
@@ -530,14 +749,37 @@ public:
         if (enabled && !previous) discoStartTick_.store(GetTickCount64());
     }
     bool SupportsDiscoMode() const { return hueFilterSupported_.load(); }
+    bool FrameGenerationActive() const { return frameGenerator_.Active(); }
+    bool FrameGenerationUsesVfgBackend() const { return frameGenerator_.IsVfg(); }
+    bool FrameGenerationUsesAmdFrcBackend() const { return frameGenerator_.IsAmdFrc(); }
+    int FrameGenerationGrid() const { return frameGenerator_.GridSize(); }
+    bool FrameGenerationUsesCostMap() const { return frameGenerator_.UsesCostMap(); }
+    int FrameGenerationLineCleanerLevel() const { return frameGenerator_.LineCleanerLevel(); }
+    const std::wstring& FrameGenerationFlowDiagnosticLine() const {
+        return frameGenerator_.FlowDiagnosticLine();
+    }
+    const std::wstring& FrameGenerationError() const { return frameGenerationFailure_; }
 
     void Shutdown() {
+        ShutdownFrameGenerationProcessor();
+        // Primero soltamos TODO lo que apunte al backbuffer. Una swap chain de
+        // modelo flip es medio celosa: DXGI no deja crear otra para el mismo
+        // HWND mientras la anterior siga viva, aunque ya no la veamos.
+        frameGenerator_.BeforeResize();
         overlayRenderer_.Shutdown();
         effectsRenderer_.Shutdown();
         SafeRelease(outputView_);
         SafeRelease(inputView_);
         SafeRelease(processor_);
         SafeRelease(processorEnum_);
+        if (swapChain_) swapChain_->SetFullscreenState(FALSE, nullptr);
+
+        // El hilo de render ya paro antes de llegar aqui, pero la GPU puede
+        // seguir terminando un Present/Blt. ClearState + query + Flush evita
+        // que el cambio 30 -> 60 intente colgar una swap chain nueva mientras
+        // Windows todavia esta despidiendo a la anterior jajajaja.
+        WaitForGpuIdleBeforeRelease();
+        frameGenerator_.Shutdown();
         SafeRelease(inputTexture_);
         SafeRelease(videoContext_);
         SafeRelease(videoDevice_);
@@ -549,10 +791,348 @@ public:
         hueFilterSupported_.store(false);
         saturationFilterSupported_ = false;
         discoFilterApplied_ = false;
+        requestedFrameGeneration_ = FrameGenerationMode::Off;
+        sourceFrameIntervalMs_ = 16.6667;
+        if (paceTimer_) {
+            CloseHandle(paceTimer_);
+            paceTimer_ = nullptr;
+        }
+        fgTelemetry_ = false;
+        lastPresentQpc_ = 0;
+        lastPresentStatsValid_ = false;
         window_ = nullptr;
     }
 
 private:
+    HRESULT CreateSwapChainForWindow(IDXGIFactory2* factory,
+                                     const DXGI_SWAP_CHAIN_DESC1& desc) {
+        if (!factory || !device_ || !window_) return E_INVALIDARG;
+
+        // Con flip-discard solo puede existir una swap chain por HWND. Algunos
+        // drivers tardan unos milisegundos en soltar la vieja aun despues del
+        // ultimo Release; E_ACCESSDENIED fue exactamente lo que vimos al pasar
+        // VFG de 30 a 60. Los reintentos son cortitos, acotados y solo aplican
+        // a los dos errores que DXGI usa para este choque de vida util.
+        constexpr DWORD kRetryDelaysMs[] = {16, 33, 50, 75, 100, 150};
+        HRESULT hr = E_FAIL;
+        for (std::size_t attempt = 0; attempt <= _countof(kRetryDelaysMs); ++attempt) {
+            SafeRelease(swapChain_);
+            hr = factory->CreateSwapChainForHwnd(
+                device_, window_, &desc, nullptr, nullptr, &swapChain_);
+            if (SUCCEEDED(hr)) {
+                if (attempt > 0) {
+                    LogLine(L"Swap chain recreada tras %zu reintento(s)", attempt);
+                }
+                return hr;
+            }
+            if ((hr != E_ACCESSDENIED && hr != DXGI_ERROR_INVALID_CALL) ||
+                attempt >= _countof(kRetryDelaysMs)) {
+                LogLine(L"CreateSwapChainForHwnd fallo: %s", HrText(hr).c_str());
+                return hr;
+            }
+            if (attempt == 0) {
+                LogLine(L"DXGI aun conserva la swap chain anterior (%s); dando tiempo al cierre",
+                        HrText(hr).c_str());
+            }
+            DwmFlush();
+            Sleep(kRetryDelaysMs[attempt]);
+        }
+        return hr;
+    }
+
+    void WaitForGpuIdleBeforeRelease() {
+        if (!context_ || !device_) return;
+        context_->ClearState();
+
+        D3D11_QUERY_DESC desc{};
+        desc.Query = D3D11_QUERY_EVENT;
+        ID3D11Query* completion = nullptr;
+        const HRESULT createHr = device_->CreateQuery(&desc, &completion);
+        if (FAILED(createHr) || !completion) {
+            context_->Flush();
+            LogLine(L"Cierre D3D11: query de GPU no disponible: %s",
+                    HrText(createHr).c_str());
+            SafeRelease(completion);
+            return;
+        }
+
+        context_->End(completion);
+        context_->Flush();
+        const ULONGLONG deadline = GetTickCount64() + 500;
+        BOOL complete = FALSE;
+        HRESULT waitHr = S_FALSE;
+        do {
+            waitHr = context_->GetData(completion, &complete, sizeof(complete), 0);
+            if (waitHr == S_OK && complete) break;
+            if (FAILED(waitHr)) break;
+            Sleep(1);
+        } while (GetTickCount64() < deadline);
+
+        if (waitHr != S_OK || !complete) {
+            LogLine(L"Cierre D3D11: la GPU no confirmo reposo (%s)",
+                    waitHr == S_FALSE ? L"timeout de 500 ms" : HrText(waitHr).c_str());
+        }
+        completion->Release();
+    }
+
+    HRESULT InitializeFrameGenerationProcessor() {
+        ShutdownFrameGenerationProcessor();
+        if (!frameGenerator_.Active() || !videoDevice_ || !videoContext_ || !inputTexture_) {
+            return E_UNEXPECTED;
+        }
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+        content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        content.InputFrameRate.Numerator = 60;
+        content.InputFrameRate.Denominator = 1;
+        content.InputWidth = inputWidth_;
+        content.InputHeight = inputHeight_;
+        content.OutputFrameRate.Numerator = 60;
+        content.OutputFrameRate.Denominator = 1;
+        content.OutputWidth = inputWidth_;
+        content.OutputHeight = inputHeight_;
+        content.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+        HRESULT hr = videoDevice_->CreateVideoProcessorEnumerator(
+            &content, &frameGenerationProcessorEnum_);
+        UINT inputSupport = 0;
+        UINT outputSupport = 0;
+        if (SUCCEEDED(hr)) hr = frameGenerationProcessorEnum_->CheckVideoProcessorFormat(
+            inputFormat_, &inputSupport);
+        if (SUCCEEDED(hr)) hr = frameGenerationProcessorEnum_->CheckVideoProcessorFormat(
+            frameGenerator_.InputSurfaceFormat(), &outputSupport);
+        if (SUCCEEDED(hr) &&
+            (!(inputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) ||
+             !(outputSupport & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT))) {
+            hr = MF_E_UNSUPPORTED_D3D_TYPE;
+        }
+        if (SUCCEEDED(hr)) hr = videoDevice_->CreateVideoProcessor(
+            frameGenerationProcessorEnum_, 0, &frameGenerationProcessor_);
+
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputView{};
+        inputView.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        if (SUCCEEDED(hr)) hr = videoDevice_->CreateVideoProcessorInputView(
+            inputTexture_, frameGenerationProcessorEnum_, &inputView,
+            &frameGenerationInputView_);
+
+        D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputView{};
+        outputView.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+        for (int index = 0;
+             index < frameGenerator_.SourceTextureCount() && SUCCEEDED(hr); ++index) {
+            hr = videoDevice_->CreateVideoProcessorOutputView(
+                frameGenerator_.SourceTexture(index), frameGenerationProcessorEnum_,
+                &outputView, &frameGenerationOutputViews_[index]);
+        }
+        if (FAILED(hr)) {
+            ShutdownFrameGenerationProcessor();
+            return hr;
+        }
+
+        RECT full{0, 0, static_cast<LONG>(inputWidth_), static_cast<LONG>(inputHeight_)};
+        videoContext_->VideoProcessorSetStreamSourceRect(
+            frameGenerationProcessor_, 0, TRUE, &full);
+        videoContext_->VideoProcessorSetStreamDestRect(
+            frameGenerationProcessor_, 0, TRUE, &full);
+        videoContext_->VideoProcessorSetOutputTargetRect(
+            frameGenerationProcessor_, TRUE, &full);
+        D3D11_VIDEO_COLOR clear{};
+        clear.RGBA.A = 1.0f;
+        videoContext_->VideoProcessorSetOutputBackgroundColor(
+            frameGenerationProcessor_, FALSE, &clear);
+        colorSpaceApplied_ = false;
+        return S_OK;
+    }
+
+    void ShutdownFrameGenerationProcessor() {
+        for (ID3D11VideoProcessorOutputView*& view : frameGenerationOutputViews_) {
+            SafeRelease(view);
+        }
+        SafeRelease(frameGenerationInputView_);
+        SafeRelease(frameGenerationProcessor_);
+        SafeRelease(frameGenerationProcessorEnum_);
+    }
+
+    HRESULT PresentFrame() {
+        const bool lowLatency = lowLatency_.load();
+        return swapChain_->Present(lowLatency ? 0 : 1,
+            lowLatency && allowTearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
+    }
+
+    double PaceTargetMs() const {
+        // En VSync no hay espera propia: los dos Present(1) quedan alineados al vblank.
+        if (!lowLatency_.load()) return 0.0;
+        return std::clamp(sourceFrameIntervalMs_ * 0.5, 1.0, 20.0);
+    }
+
+    // Espera hasta un instante ABSOLUTO del QueryPerformanceCounter. Antes la espera
+    // era relativa ("8.3 ms desde que volvio el primer Present") y usaba
+    // Sleep(remaining - 0.5): sin timeBeginPeriod eso dormia hasta 15.6 ms, asi que
+    // la separacion generado->real era de 9 a 23 ms en lugar de 8.3 ms.
+    // Aqui: timer de alta resolucion para casi todo el tramo y spin el ultimo ~0.6 ms.
+    void WaitUntilQpc(LONGLONG targetQpc, LONGLONG counterFrequency) const {
+        if (counterFrequency <= 0) return;
+        for (;;) {
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            const LONGLONG remainingTicks = targetQpc - now.QuadPart;
+            if (remainingTicks <= 0) return;
+            const double remainingMs = static_cast<double>(remainingTicks) * 1000.0 /
+                                       static_cast<double>(counterFrequency);
+            if (paceTimer_ && remainingMs > 1.0) {
+                LARGE_INTEGER due{};
+                due.QuadPart = -static_cast<LONGLONG>((remainingMs - 0.6) * 10000.0);
+                if (SetWaitableTimer(paceTimer_, &due, 0, nullptr, nullptr, FALSE)) {
+                    WaitForSingleObject(paceTimer_, 100);
+                    continue;
+                }
+            }
+            YieldProcessor();
+        }
+    }
+
+    // Presents que DXGI ya mostro frente a vblanks transcurridos (ver
+    // frame_generation_telemetry.h). En modo tearing el driver puede no dar datos.
+    void CollectPresentStatistics(FrameGenSample& sample, LONGLONG counterFrequency) {
+        DXGI_FRAME_STATISTICS stats{};
+        const HRESULT hr = swapChain_->GetFrameStatistics(&stats);
+        sample.statsHr = hr;
+        if (FAILED(hr)) {
+            lastPresentStatsValid_ = false;
+            return;
+        }
+        if (lastPresentStatsValid_) {
+            sample.statsValid = true;
+            sample.presentDelta = stats.PresentCount - lastPresentStats_.PresentCount;
+            sample.refreshDelta = stats.PresentRefreshCount - lastPresentStats_.PresentRefreshCount;
+            const UINT syncDelta = stats.SyncRefreshCount - lastPresentStats_.SyncRefreshCount;
+            const LONGLONG qpcDelta = stats.SyncQPCTime.QuadPart - lastPresentStats_.SyncQPCTime.QuadPart;
+            if (syncDelta > 0 && qpcDelta > 0 && counterFrequency > 0) {
+                sample.refreshHz = static_cast<double>(syncDelta) *
+                                   static_cast<double>(counterFrequency) /
+                                   static_cast<double>(qpcDelta);
+            }
+        }
+        lastPresentStats_ = stats;
+        lastPresentStatsValid_ = true;
+    }
+
+    HRESULT RenderWithFrameGeneration(
+        const std::shared_ptr<const OverlayConfig>& overlayConfig,
+        const OverlayStats& overlayStats, bool sourceChanged, bool latencyHud,
+        RenderTiming* timing, const LARGE_INTEGER& frequency,
+        const LARGE_INTEGER& processingStarted) {
+        if (!frameGenerationProcessor_ || !frameGenerationInputView_ ||
+            !frameGenerationOutputViews_[0] || !frameGenerationOutputViews_[1] ||
+            (frameGenerator_.SourceTextureCount() == 3 && !frameGenerationOutputViews_[2])) {
+            return E_UNEXPECTED;
+        }
+
+        bool generated = false;
+        if (sourceChanged || !frameGenerator_.HasCurrent()) {
+            HRESULT hr = frameGenerator_.PrepareForConvertedFrame();
+            if (FAILED(hr)) return hr;
+            D3D11_VIDEO_PROCESSOR_STREAM stream{};
+            stream.Enable = TRUE;
+            stream.pInputSurface = frameGenerationInputView_;
+            const int pending = frameGenerator_.PendingIndex();
+            hr = videoContext_->VideoProcessorBlt(
+                frameGenerationProcessor_, frameGenerationOutputViews_[pending], 0, 1, &stream);
+            if (FAILED(hr)) return hr;
+            hr = frameGenerator_.CommitConvertedFrame();
+            if (FAILED(hr)) return hr;
+            generated = hr == S_OK;
+        }
+
+        double presentMs = 0.0;
+        std::uint32_t presents = 0;
+        LONGLONG presentStartQpc[2] = {0, 0};
+        auto drawFrame = [&](bool generatedFrame) -> HRESULT {
+            const HRESULT hr = generatedFrame
+                ? frameGenerator_.DrawGenerated(contentRect_)
+                : frameGenerator_.DrawCurrent(contentRect_);
+            if (FAILED(hr)) return hr;
+            return overlayRenderer_.Draw(overlayConfig, overlayStats, contentRect_, latencyHud);
+        };
+        auto presentFrame = [&]() -> HRESULT {
+            LARGE_INTEGER presentStarted{};
+            LARGE_INTEGER presentFinished{};
+            QueryPerformanceCounter(&presentStarted);
+            const HRESULT hr = PresentFrame();
+            QueryPerformanceCounter(&presentFinished);
+            if (frequency.QuadPart > 0) {
+                presentMs += static_cast<double>(presentFinished.QuadPart - presentStarted.QuadPart) *
+                             1000.0 / static_cast<double>(frequency.QuadPart);
+            }
+            if (presents < 2) presentStartQpc[presents] = presentStarted.QuadPart;
+            ++presents;
+            return hr;
+        };
+
+        double pacingWaitMs = 0.0;
+        double paceTargetMs = 0.0;
+        if (generated) {
+            // Orden temporal: frame generado (t = 0.5) y luego el real.
+            HRESULT hr = drawFrame(true);
+            if (FAILED(hr)) return hr;
+            hr = presentFrame();
+            if (FAILED(hr)) return hr;
+            // El frame real se DIBUJA ya (mientras la GPU termina el generado) y solo
+            // el Present espera. Asi el reloj de pacing no incluye el costo del draw ni
+            // del overlay y el Present real cae a ~sourceInterval/2 del generado.
+            hr = drawFrame(false);
+            if (FAILED(hr)) return hr;
+            paceTargetMs = PaceTargetMs();
+            if (paceTargetMs > 0.0 && frequency.QuadPart > 0) {
+                const LONGLONG target = presentStartQpc[0] + static_cast<LONGLONG>(
+                    paceTargetMs * static_cast<double>(frequency.QuadPart) / 1000.0);
+                LARGE_INTEGER waitStarted{};
+                LARGE_INTEGER waitFinished{};
+                QueryPerformanceCounter(&waitStarted);
+                WaitUntilQpc(target, frequency.QuadPart);
+                QueryPerformanceCounter(&waitFinished);
+                pacingWaitMs = static_cast<double>(waitFinished.QuadPart - waitStarted.QuadPart) *
+                               1000.0 / static_cast<double>(frequency.QuadPart);
+            }
+        } else {
+            const HRESULT hr = drawFrame(false);
+            if (FAILED(hr)) return hr;
+        }
+        const HRESULT presentHr = presentFrame();
+        LARGE_INTEGER finished{};
+        QueryPerformanceCounter(&finished);
+        if (timing && frequency.QuadPart > 0) {
+            const double toMs = 1000.0 / static_cast<double>(frequency.QuadPart);
+            const double totalMs = static_cast<double>(finished.QuadPart - processingStarted.QuadPart) * toMs;
+            timing->processingMs = std::max(0.0, totalMs - presentMs - pacingWaitMs);
+            timing->presentMs = presentMs;
+            timing->opticalFlowMs = frameGenerator_.LastFlowMs();
+            timing->presents = presents;
+            timing->generatedFrame = generated;
+
+            FrameGenSample& sample = timing->fg;
+            sample = FrameGenSample{};
+            sample.generated = generated;
+            if (lastPresentQpc_ > 0 && presentStartQpc[0] > lastPresentQpc_) {
+                sample.sincePreviousPresentMs =
+                    static_cast<double>(presentStartQpc[0] - lastPresentQpc_) * toMs;
+            }
+            if (presents >= 2) {
+                sample.pairGapMs = static_cast<double>(presentStartQpc[1] - presentStartQpc[0]) * toMs;
+            }
+            sample.paceTargetMs = paceTargetMs;
+            sample.paceActualMs = pacingWaitMs;
+            sample.opticalSubmitMs = frameGenerator_.LastFlowMs();
+            sample.opticalGpuMs = frameGenerator_.GpuOpticalMs();
+            sample.warpGpuMs = frameGenerator_.GpuWarpMs();
+            sample.syncVideoToOfaMs = frameGenerator_.SyncVideoToOfaMs();
+            sample.syncOfaToShaderMs = frameGenerator_.SyncOfaToShaderMs();
+            sample.syncBeforeReuseMs = frameGenerator_.SyncBeforeReuseMs();
+            sample.warp = frameGenerator_.WarpStats();
+            if (fgTelemetry_) CollectPresentStatistics(sample, frequency.QuadPart);
+        }
+        if (presents > 0) lastPresentQpc_ = presentStartQpc[presents > 1 ? 1 : 0];
+        return presentHr;
+    }
+
     void ApplyColorSpace() {
         if (!videoContext_ || !processor_) return;
         const bool fullRange = inputFullRange_.load();
@@ -572,6 +1152,12 @@ private:
         outputColor.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
         videoContext_->VideoProcessorSetStreamColorSpace(processor_, 0, &inputColor);
         videoContext_->VideoProcessorSetOutputColorSpace(processor_, &outputColor);
+        if (frameGenerationProcessor_) {
+            videoContext_->VideoProcessorSetStreamColorSpace(
+                frameGenerationProcessor_, 0, &inputColor);
+            videoContext_->VideoProcessorSetOutputColorSpace(
+                frameGenerationProcessor_, &outputColor);
+        }
         appliedInputFullRange_ = fullRange;
         colorSpaceApplied_ = true;
     }
@@ -584,10 +1170,21 @@ private:
                 videoContext_->VideoProcessorSetStreamFilter(
                     processor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_HUE,
                     FALSE, hueRange_.Default);
+                if (frameGenerationProcessor_) {
+                    videoContext_->VideoProcessorSetStreamFilter(
+                        frameGenerationProcessor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_HUE,
+                        FALSE, hueRange_.Default);
+                }
                 if (saturationFilterSupported_) {
                     videoContext_->VideoProcessorSetStreamFilter(
                         processor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_SATURATION,
                         FALSE, saturationRange_.Default);
+                    if (frameGenerationProcessor_) {
+                        videoContext_->VideoProcessorSetStreamFilter(
+                            frameGenerationProcessor_, 0,
+                            D3D11_VIDEO_PROCESSOR_FILTER_SATURATION,
+                            FALSE, saturationRange_.Default);
+                    }
                 }
                 discoFilterApplied_ = false;
             }
@@ -600,6 +1197,11 @@ private:
             hueRange_.Minimum, hueRange_.Maximum, elapsed);
         videoContext_->VideoProcessorSetStreamFilter(
             processor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_HUE, TRUE, hue);
+        if (frameGenerationProcessor_) {
+            videoContext_->VideoProcessorSetStreamFilter(
+                frameGenerationProcessor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_HUE,
+                TRUE, hue);
+        }
 
         if (!discoFilterApplied_ && saturationFilterSupported_) {
             const int saturation = ComputeDiscoSaturationLevel(
@@ -607,6 +1209,12 @@ private:
             videoContext_->VideoProcessorSetStreamFilter(
                 processor_, 0, D3D11_VIDEO_PROCESSOR_FILTER_SATURATION,
                 TRUE, saturation);
+            if (frameGenerationProcessor_) {
+                videoContext_->VideoProcessorSetStreamFilter(
+                    frameGenerationProcessor_, 0,
+                    D3D11_VIDEO_PROCESSOR_FILTER_SATURATION,
+                    TRUE, saturation);
+            }
         }
         discoFilterApplied_ = true;
     }
@@ -700,7 +1308,10 @@ private:
         const HRESULT effectsHr = effectsRenderer_.CreateTarget(device_, videoDevice_, processorEnum_, swapChain_);
         if (FAILED(effectsHr)) LogLine(L"Ruta directa sin shaders: %s", HrText(effectsHr).c_str());
         effectsUnavailableReported_ = false;
-        return overlayRenderer_.CreateTarget(swapChain_);
+        HRESULT targetHr = S_OK;
+        if (frameGenerator_.Active()) targetHr = frameGenerator_.SetOutputTarget(swapChain_);
+        if (SUCCEEDED(targetHr)) targetHr = overlayRenderer_.CreateTarget(swapChain_);
+        return targetHr;
     }
 
     HWND window_ = nullptr;
@@ -723,6 +1334,15 @@ private:
     RECT contentRect_{};
     OverlayRenderer overlayRenderer_;
     VideoEffectsRenderer effectsRenderer_;
+    FrameGeneratorRouter frameGenerator_;
+    FrameGenerationMode requestedFrameGeneration_ = FrameGenerationMode::Off;
+    double sourceFrameIntervalMs_ = 16.6667;
+    HANDLE paceTimer_ = nullptr;
+    bool fgTelemetry_ = false;
+    LONGLONG lastPresentQpc_ = 0;
+    bool lastPresentStatsValid_ = false;
+    DXGI_FRAME_STATISTICS lastPresentStats_{};
+    std::wstring frameGenerationFailure_;
     bool effectsUnavailableReported_ = false;
     ID3D11Device* device_ = nullptr;
     ID3D11DeviceContext* context_ = nullptr;
@@ -734,6 +1354,10 @@ private:
     ID3D11VideoProcessor* processor_ = nullptr;
     ID3D11VideoProcessorInputView* inputView_ = nullptr;
     ID3D11VideoProcessorOutputView* outputView_ = nullptr;
+    ID3D11VideoProcessorEnumerator* frameGenerationProcessorEnum_ = nullptr;
+    ID3D11VideoProcessor* frameGenerationProcessor_ = nullptr;
+    ID3D11VideoProcessorInputView* frameGenerationInputView_ = nullptr;
+    std::array<ID3D11VideoProcessorOutputView*, 3> frameGenerationOutputViews_{};
 };
 
 // WASAPI puede darnos 8/16/24/32 bits o float. Estas dos funciones traducen
@@ -1087,6 +1711,10 @@ enum : int {
     IDC_KOFI = 1012,
     IDC_GITHUB = 1013,
     IDC_AUTOTUNE = 1014,
+    IDC_RESCAN = 1015,
+    IDC_COMPRESSED = 1016,
+    IDC_COMPRESSED_LABEL = 1017,
+    IDC_FRAME_GENERATION = 1018,
     IDM_FULLSCREEN = 2000,
     IDM_MUTE,
     IDM_VSYNC,
@@ -1189,6 +1817,9 @@ public:
             ? AppLanguage::English : AppLanguage::Spanish;
         deviceFingerprint_ = DeviceFingerprint();
         CreateControls();
+        allowCompressed_ = GetPrivateProfileIntW(
+            L"capture", L"allow_compressed", 0, IniPath().c_str()) == 1;
+        Button_SetCheck(compressedCheck_, allowCompressed_ ? BST_CHECKED : BST_UNCHECKED);
         SetTimer(window_, 1, 1000, nullptr);
         SetTimer(window_, 2, 100, nullptr);
         SetTimer(window_, 5, 250, nullptr);
@@ -1241,12 +1872,321 @@ public:
         return running_.load() && activeSession_.load() == sessionId;
     }
 
+    void PostCompatFailure(std::uint64_t sessionId, CompatFailureReason reason,
+                           HRESULT hr, const std::wstring& detail) {
+        if (!IsActiveSession(sessionId)) return;
+        bool shouldPost = false;
+        {
+            ExclusiveSrwGuard guard(failureLock_);
+            pendingFailure_ = PendingCaptureFailure{sessionId, reason, hr, detail};
+            if (!failureMessagePosted_) {
+                failureMessagePosted_ = true;
+                shouldPost = true;
+            }
+        }
+        if (shouldPost && !PostMessageW(window_, WM_DAYAAH_COMPAT_FAILURE, 0, 0)) {
+            ExclusiveSrwGuard guard(failureLock_);
+            failureMessagePosted_ = false;
+        }
+    }
+
+    FormatValidation QueryCurrentDecodedFormat(DecodedFormat& format) {
+        IMFSourceReader* reader = nullptr;
+        {
+            SharedSrwGuard guard(readerLock_);
+            if (reader_) {
+                reader = reader_;
+                reader->AddRef();
+            }
+        }
+        if (!reader) return FormatValidation::Invalid;
+        IMFMediaType* current = nullptr;
+        const HRESULT hr = reader->GetCurrentMediaType(
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM, &current);
+        const FormatValidation validation = SUCCEEDED(hr)
+            ? ParseDecodedFormat(current, format) : FormatValidation::Invalid;
+        SafeRelease(current);
+        reader->Release();
+        return validation;
+    }
+
+    bool DecodedFormatFitsRenderer(const DecodedFormat& format) const {
+        return DecodedFormatMatchesActiveMode(format) && format.subtype == rendererInputSubtype_;
+    }
+
+    MediaTypeChangeAction HandleCurrentMediaTypeChanged(std::uint64_t sessionId) {
+        if (!IsActiveSession(sessionId)) return MediaTypeChangeAction::Stop;
+        if (!compressedMode_) return MediaTypeChangeAction::Phoenix;
+        DecodedFormat next{};
+        const FormatValidation validation = QueryCurrentDecodedFormat(next);
+        if (validation == FormatValidation::Unknown) {
+            ExclusiveSrwGuard guard(sampleLock_);
+            decodedFormatValidation_ = validation;
+            return MediaTypeChangeAction::Continue;
+        }
+        if (validation == FormatValidation::Invalid) {
+            PostCompatFailure(sessionId, CompatFailureReason::ModeIncompatible,
+                              MF_E_INVALIDMEDIATYPE,
+                              L"El decoder entregó un formato o aperture inválido.");
+            return MediaTypeChangeAction::Stop;
+        }
+        if (!DecodedFormatFitsRenderer(next)) {
+            if (decodedFormatValidated_.load()) return MediaTypeChangeAction::Phoenix;
+            PostCompatFailure(sessionId, CompatFailureReason::ModeIncompatible,
+                              MF_E_INVALIDMEDIATYPE,
+                              L"El tamaño visible o subtipo del decoder no coincide con el modo anunciado.");
+            return MediaTypeChangeAction::Stop;
+        }
+        {
+            ExclusiveSrwGuard guard(sampleLock_);
+            decodedFormat_ = next;
+            decodedFormatValidation_ = validation;
+        }
+        LogLine(L"Decoder actualizó formato: coded=%ux%u visible=%ux%u offset=%u,%u stride=%ld %s",
+                next.codedWidth, next.codedHeight, next.visibleWidth, next.visibleHeight,
+                next.apertureX, next.apertureY, next.stride,
+                GuidFormatName(next.subtype).c_str());
+        return MediaTypeChangeAction::Continue;
+    }
+
+    static bool CheckedMultiplySize(size_t left, size_t right, size_t& result) {
+        if (left && right > std::numeric_limits<size_t>::max() / left) return false;
+        result = left * right;
+        return true;
+    }
+
+    static bool CheckedAddSize(size_t left, size_t right, size_t& result) {
+        if (right > std::numeric_limits<size_t>::max() - left) return false;
+        result = left + right;
+        return true;
+    }
+
+    HRESULT CopyDecodedRows(const BYTE* source, size_t available, LONG sourceStride,
+                            const DecodedFormat& format, std::vector<BYTE>& destination) {
+        if (!source || sourceStride <= 0 || !available) return MF_E_BUFFERTOOSMALL;
+        const size_t pitch = static_cast<size_t>(sourceStride);
+        const size_t minimumPitch = TightRowPitch(format.subtype, format.codedWidth);
+        if (pitch < minimumPitch) return MF_E_BUFFERTOOSMALL;
+
+        size_t yBytes = 0;
+        if (!CheckedMultiplySize(pitch, format.codedHeight, yBytes)) return E_INVALIDARG;
+        size_t required = yBytes;
+        if (format.subtype == MFVideoFormat_NV12) {
+            size_t uvBytes = 0;
+            if (!CheckedMultiplySize(pitch, (format.codedHeight + 1u) / 2u, uvBytes) ||
+                !CheckedAddSize(yBytes, uvBytes, required)) return E_INVALIDARG;
+        }
+        if (available < required) return MF_E_BUFFERTOOSMALL;
+
+        const size_t rowBytes = TightRowPitch(format.subtype, format.visibleWidth);
+        const size_t tightSize = TightFrameSize(format.subtype,
+                                                format.visibleWidth, format.visibleHeight);
+        if (!rowBytes || !tightSize) return E_INVALIDARG;
+        destination.resize(tightSize);
+
+        size_t sourceOffset = 0;
+        size_t rowOffset = 0;
+        if (!CheckedMultiplySize(static_cast<size_t>(format.apertureY), pitch, rowOffset)) {
+            return E_INVALIDARG;
+        }
+        const size_t xBytes = format.subtype == MFVideoFormat_YUY2
+            ? static_cast<size_t>(format.apertureX) * 2u
+            : static_cast<size_t>(format.apertureX);
+        if (!CheckedAddSize(rowOffset, xBytes, sourceOffset)) return E_INVALIDARG;
+        for (UINT32 row = 0; row < format.visibleHeight; ++row) {
+            memcpy(destination.data() + static_cast<size_t>(row) * rowBytes,
+                   source + sourceOffset + static_cast<size_t>(row) * pitch, rowBytes);
+        }
+
+        if (format.subtype == MFVideoFormat_NV12) {
+            size_t uvRowOffset = 0;
+            if (!CheckedMultiplySize(static_cast<size_t>(format.apertureY / 2u), pitch,
+                                     uvRowOffset) ||
+                !CheckedAddSize(yBytes, uvRowOffset, uvRowOffset) ||
+                !CheckedAddSize(uvRowOffset, format.apertureX, uvRowOffset)) {
+                return E_INVALIDARG;
+            }
+            BYTE* destinationUv = destination.data() +
+                static_cast<size_t>(format.visibleWidth) * format.visibleHeight;
+            for (UINT32 row = 0; row < format.visibleHeight / 2u; ++row) {
+                memcpy(destinationUv + static_cast<size_t>(row) * format.visibleWidth,
+                       source + uvRowOffset + static_cast<size_t>(row) * pitch,
+                       format.visibleWidth);
+            }
+        }
+        return S_OK;
+    }
+
+    HRESULT CopyCompressedBuffer(IMFMediaBuffer* buffer, const DecodedFormat& format,
+                                 LONG& outputStride) {
+        if (!buffer) return E_POINTER;
+        HRESULT hr = E_NOINTERFACE;
+        IMF2DBuffer2* buffer2d2 = nullptr;
+        if (SUCCEEDED(buffer->QueryInterface(IID_PPV_ARGS(&buffer2d2)))) {
+            BYTE* scanline = nullptr;
+            BYTE* bufferStart = nullptr;
+            LONG pitch = 0;
+            DWORD bufferLength = 0;
+            hr = buffer2d2->Lock2DSize(MF2DBuffer_LockFlags_Read,
+                                       &scanline, &pitch, &bufferStart, &bufferLength);
+            if (SUCCEEDED(hr)) {
+                size_t available = 0;
+                if (scanline && bufferStart && scanline >= bufferStart &&
+                    static_cast<size_t>(scanline - bufferStart) <= bufferLength) {
+                    available = bufferLength - static_cast<size_t>(scanline - bufferStart);
+                }
+                hr = CopyDecodedRows(scanline, available, pitch, format, captureFrame_);
+                buffer2d2->Unlock2D();
+            }
+            buffer2d2->Release();
+            if (SUCCEEDED(hr)) {
+                outputStride = static_cast<LONG>(TightRowPitch(format.subtype,
+                                                                format.visibleWidth));
+                return S_OK;
+            }
+        }
+
+        DWORD current = 0;
+        buffer->GetCurrentLength(&current);
+        IMF2DBuffer* buffer2d = nullptr;
+        if (SUCCEEDED(buffer->QueryInterface(IID_PPV_ARGS(&buffer2d)))) {
+            BYTE* scanline = nullptr;
+            LONG pitch = 0;
+            hr = buffer2d->Lock2D(&scanline, &pitch);
+            if (SUCCEEDED(hr)) {
+                hr = CopyDecodedRows(scanline, current, pitch, format, captureFrame_);
+                buffer2d->Unlock2D();
+            }
+            if (FAILED(hr)) {
+                DWORD contiguous = 0;
+                hr = buffer2d->GetContiguousLength(&contiguous);
+                if (SUCCEEDED(hr) && contiguous) {
+                    captureNative_.resize(contiguous);
+                    hr = buffer2d->ContiguousCopyTo(captureNative_.data(), contiguous);
+                    if (SUCCEEDED(hr)) {
+                        const LONG tightCodedStride = static_cast<LONG>(
+                            TightRowPitch(format.subtype, format.codedWidth));
+                        hr = CopyDecodedRows(captureNative_.data(), contiguous,
+                                             tightCodedStride, format, captureFrame_);
+                    }
+                }
+            }
+            buffer2d->Release();
+        } else {
+            BYTE* flat = nullptr;
+            DWORD maximum = 0;
+            hr = buffer->Lock(&flat, &maximum, &current);
+            if (SUCCEEDED(hr)) {
+                hr = CopyDecodedRows(flat, current, format.stride, format, captureFrame_);
+                buffer->Unlock();
+            }
+        }
+        if (SUCCEEDED(hr)) {
+            outputStride = static_cast<LONG>(TightRowPitch(format.subtype,
+                                                            format.visibleWidth));
+        }
+        return hr;
+    }
+
+    static HRESULT GetBestSampleBuffer(IMFSample* sample, IMFMediaBuffer** buffer) {
+        if (!sample || !buffer) return E_POINTER;
+        *buffer = nullptr;
+        DWORD count = 0;
+        HRESULT hr = sample->GetBufferCount(&count);
+        if (SUCCEEDED(hr) && count == 1) hr = sample->GetBufferByIndex(0, buffer);
+        else if (SUCCEEDED(hr)) hr = sample->ConvertToContiguousBuffer(buffer);
+        return hr;
+    }
+
+    void RecordInvalidSample(std::uint64_t sessionId, HRESULT hr) {
+        const unsigned failures = consecutiveInvalidSamples_.fetch_add(1) + 1;
+        LogLine(L"Sample comprimido descartado (%u/30): %s", failures, HrText(hr).c_str());
+        if (!decodedFormatValidated_.load() && failures >= 30) {
+            const bool retrySoftware = decodeBackend_ == DecodeBackend::Hardware;
+            PostCompatFailure(sessionId,
+                retrySoftware ? CompatFailureReason::RetrySoftwareDecoder
+                              : CompatFailureReason::ModeIncompatible,
+                hr, retrySoftware
+                    ? L"DXVA entregó buffers que la ruta de copia no pudo leer."
+                    : L"El decoder no produjo ningún frame válido después de 30 intentos.");
+        }
+    }
+
+    void OnCompressedVideoSample(std::uint64_t sessionId, IMFSample* sample,
+                                 LONGLONG sourceTimestamp) {
+        if (!IsActiveSession(sessionId) || !sample) return;
+        lastSampleArrivalTick_.store(GetTickCount64());
+        ExclusiveSrwGuard producerGuard(sampleLock_);
+        if (!IsActiveSession(sessionId)) return;
+
+        if (decodedFormatValidation_ == FormatValidation::Unknown ||
+            (!decodedFormatValidated_.load() &&
+             decodedFormatValidation_ == FormatValidation::Valid &&
+             !DecodedFormatFitsRenderer(decodedFormat_))) {
+            DecodedFormat refreshed{};
+            decodedFormatValidation_ = QueryCurrentDecodedFormat(refreshed);
+            if (decodedFormatValidation_ == FormatValidation::Valid) decodedFormat_ = refreshed;
+        }
+        if (decodedFormatValidation_ == FormatValidation::Invalid) {
+            PostCompatFailure(sessionId, CompatFailureReason::ModeIncompatible,
+                              MF_E_INVALIDMEDIATYPE, L"El decoder entregó un formato inválido.");
+            return;
+        }
+        if (decodedFormatValidation_ != FormatValidation::Valid ||
+            !DecodedFormatFitsRenderer(decodedFormat_)) {
+            RecordInvalidSample(sessionId, MF_E_INVALIDMEDIATYPE);
+            return;
+        }
+
+        IMFMediaBuffer* buffer = nullptr;
+        HRESULT hr = GetBestSampleBuffer(sample, &buffer);
+        LONG incomingStride = 0;
+        if (SUCCEEDED(hr)) hr = CopyCompressedBuffer(buffer, decodedFormat_, incomingStride);
+        SafeRelease(buffer);
+        if (FAILED(hr)) {
+            RecordInvalidSample(sessionId, hr);
+            return;
+        }
+
+        consecutiveInvalidSamples_.store(0);
+        decodedFormatValidated_.store(true);
+        const ULONGLONG arrival = GetTickCount64();
+        LARGE_INTEGER counter{};
+        LARGE_INTEGER frequency{};
+        QueryPerformanceCounter(&counter);
+        QueryPerformanceFrequency(&frequency);
+        const PublishedFrameDescriptor descriptor{
+            activeMode_.subtype, decodedFormat_.subtype,
+            decodedFormat_.visibleWidth, decodedFormat_.visibleHeight,
+            incomingStride, true};
+        EnterCriticalSection(&frameLock_);
+        framePacing_.Add(sourceTimestamp, counter.QuadPart, frequency.QuadPart);
+        if (framePending_) {
+            discardedFrames_++;
+            governorDiscardedFrames_++;
+        }
+        latestFrame_.swap(captureFrame_);
+        latestFrameArrivalTick_ = arrival;
+        latestFrameStride_ = incomingStride;
+        latestFrameDescriptor_ = descriptor;
+        framePending_ = true;
+        LeaveCriticalSection(&frameLock_);
+        receivedFrames_++;
+        lastFrameArrivalTick_.store(arrival);
+        if (frameReadyEvent_) SetEvent(frameReadyEvent_);
+    }
+
     void OnVideoSample(std::uint64_t sessionId, IMFSample* sample,
                        LONGLONG sourceTimestamp) {
         // Media Foundation puede entregar buffers 2D con padding o un buffer
         // plano. Copiamos directo a un buffer reciclable; asi no apartamos y
         // copiamos otros 12 MB dos veces por cada frame 4K nomas porque si.
         if (!IsActiveSession(sessionId) || !sample) return;
+        if (compressedMode_) {
+            OnCompressedVideoSample(sessionId, sample, sourceTimestamp);
+            return;
+        }
+        lastSampleArrivalTick_.store(GetTickCount64());
         ExclusiveSrwGuard producerGuard(sampleLock_);
         if (!IsActiveSession(sessionId)) return;
         IMFMediaBuffer* buffer = nullptr;
@@ -1255,7 +2195,7 @@ public:
         DWORD maximum = 0;
         DWORD current = 0;
 
-        HRESULT hr = sample->ConvertToContiguousBuffer(&buffer);
+        HRESULT hr = GetBestSampleBuffer(sample, &buffer);
         if (FAILED(hr)) return;
         const size_t tightSize = TightFrameSize(activeMode_.subtype,
                                                 activeMode_.width, activeMode_.height);
@@ -1388,9 +2328,14 @@ public:
         latestFrame_.swap(captureFrame_);
         latestFrameArrivalTick_ = arrival;
         latestFrameStride_ = incomingStride;
+        latestFrameDescriptor_ = PublishedFrameDescriptor{
+            activeMode_.subtype, activeMode_.subtype,
+            activeMode_.width, activeMode_.height, incomingStride, false};
         framePending_ = true;
         LeaveCriticalSection(&frameLock_);
         receivedFrames_++;
+        decodedFormatValidated_.store(true);
+        consecutiveInvalidSamples_.store(0);
         lastFrameArrivalTick_.store(arrival);
         if (frameReadyEvent_) SetEvent(frameReadyEvent_);
     }
@@ -1417,8 +2362,66 @@ public:
 
     void ReaderError(std::uint64_t sessionId, HRESULT hr) {
         if (!IsActiveSession(sessionId)) return;
+        captureErrorSession_.store(sessionId);
         captureError_.store(hr);
         PostMessageW(window_, WM_DAYAAH_CAPTURE_ERROR, 0, 0);
+    }
+
+    void HandlePendingCompatibilityFailure() {
+        std::optional<PendingCaptureFailure> failure;
+        {
+            ExclusiveSrwGuard guard(failureLock_);
+            failure = std::move(pendingFailure_);
+            pendingFailure_.reset();
+            failureMessagePosted_ = false;
+        }
+        if (!failure || failure->sessionId != activeSession_.load() || !running_.load()) return;
+
+        const int deviceIndex = activeDeviceIndex_;
+        int modeIndex = -1;
+        if (deviceIndex >= 0 && deviceIndex < static_cast<int>(videoDevices_.size())) {
+            const auto& modes = videoDevices_[deviceIndex].modes;
+            for (std::size_t i = 0; i < modes.size(); ++i) {
+                if (modes[i].Key() == activeMode_.Key()) modeIndex = static_cast<int>(i);
+            }
+        }
+        const std::wstring runtimeKey = RuntimeModeKey(deviceIndex, activeMode_);
+        const std::wstring failedLabel = activeMode_.Label();
+        const bool wasMuted = audio_.IsMuted();
+
+        if (failure->reason == CompatFailureReason::RetrySoftwareDecoder &&
+            deviceIndex >= 0 && modeIndex >= 0) {
+            softwareDecoderModes_.insert(runtimeKey);
+            LogLine(L"DXVA descartado para %s; reintentando decoder software: %s",
+                    failedLabel.c_str(), failure->detail.c_str());
+            StopCapture();
+            ComboBox_SetCurSel(videoCombo_, deviceIndex);
+            PopulateModeSelectors(deviceIndex, modeIndex);
+            const HRESULT retryHr = StartCapture(true);
+            if (SUCCEEDED(retryHr)) {
+                if (wasMuted && !audio_.IsMuted()) audio_.ToggleMute();
+                ShowViewerNotice(Tr(language_,
+                    L"DXVA no funcionó con este driver. Se activó el decoder por software.",
+                    L"DXVA did not work with this driver. Software decoding is now active."), 5200);
+                return;
+            }
+            failure->hr = retryHr;
+            failure->detail = L"También falló el decoder por software.";
+        }
+
+        incompatibleModes_.insert(runtimeKey);
+        LogLine(L"Modo comprimido incompatible durante esta ejecución: %s; %s; %s",
+                failedLabel.c_str(), failure->detail.c_str(), HrText(failure->hr).c_str());
+        StopCapture();
+        ComboBox_SetCurSel(videoCombo_, std::max(0, deviceIndex));
+        PopulateModeSelectors(std::max(0, deviceIndex), -1);
+        ShowSetup(true);
+        UpdateSetupAvailability();
+        MessageBoxW(window_, (std::wstring(Tr(language_,
+            L"Este modo comprimido no produjo video utilizable y se desactivó hasta el próximo reescaneo.\n\n",
+            L"This compressed mode did not produce usable video and was disabled until the next rescan.\n\n")) +
+            failedLabel + L"\n" + failure->detail + L"\n\n" + HrText(failure->hr)).c_str(),
+            kAppTitle, MB_OK | MB_ICONWARNING);
     }
 
 private:
@@ -1470,11 +2473,27 @@ private:
                     Tr(language_, L"Efectos de video", L"Video effects"), MB_OK | MB_ICONWARNING);
             }
             return 0;
+        case WM_DAYAAH_FRAMEGEN_ERROR:
+            activeFrameGenerationMode_ = FrameGenerationMode::Off;
+            effectsPacked_.store(effectsSettings_.Pack(), std::memory_order_relaxed);
+            if (renderer_ && activeDiscoMode_.load() && !pictureInPicture_ &&
+                renderer_->SupportsDiscoMode()) {
+                renderer_->SetDiscoMode(true);
+            }
+            ShowViewerNotice(Tr(language_,
+                L"Frame Generation se desactivó; la captura continúa por la ruta normal.",
+                L"Frame Generation was disabled; capture continues on the normal path."),
+                6500);
+            return 0;
         case WM_DAYAAH_CAPTURE_ERROR: {
+            if (captureErrorSession_.load() != activeSession_.load()) return 0;
             HRESULT hr = captureError_.load();
             ScheduleRecovery(hr);
             return 0;
         }
+        case WM_DAYAAH_COMPAT_FAILURE:
+            HandlePendingCompatibilityFailure();
+            return 0;
         case WM_GETMINMAXINFO: {
             auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
             limits->ptMinTrackSize.x = pictureInPicture_ ? 320 : (capturingUi_ ? 320 : 900);
@@ -1547,7 +2566,8 @@ private:
         case WM_KEYDOWN:
             // Hotkeys del viewer. El bit 30 evita repetir la accion si alguien
             // deja la tecla aplastada como si le debiera dinero.
-            if (wParam == VK_F6 && !(lParam & (1LL << 30)) && running_.load() && !pictureInPicture_) ToggleEffects();
+            if (wParam == VK_F6 && !(lParam & (1LL << 30)) && running_.load() &&
+                !VisualEffectsPaused()) ToggleEffects();
             else if (wParam == VK_F7 && !(lParam & (1LL << 30)) && running_.load() && !pictureInPicture_) OpenEffectsEditor();
             else if (wParam == VK_F8 && !(lParam & (1LL << 30)) && running_.load()) ToggleLatencyHud();
             else if (wParam == VK_F9 && !(lParam & (1LL << 30)) && running_.load()) TogglePacingScope();
@@ -1631,17 +2651,39 @@ private:
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
-        videoCombo_ = CreateCombo(IDC_VIDEO, 48, 132, 804);
+        videoCombo_ = CreateCombo(IDC_VIDEO, 48, 132, 642);
+        rescanButton_ = CreateWindowExW(0, L"BUTTON", L"",
+                                        WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                        706, 132, 146, 30, window_,
+                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_RESCAN)),
+                                        instance_, nullptr);
+        compressedCheck_ = CreateWindowExW(0, L"BUTTON", L"",
+                                            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                            48, 164, 24, 24, window_,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_COMPRESSED)),
+                                            instance_, nullptr);
+        // El checkbox estandar de Win32 se ponia necio y pintaba su texto negro
+        // aunque toda la ventana fuera oscura. Dejamos el cuadrito solito y el
+        // texto vive en un STATIC claro que tambien se puede picar.
+        compressedLabel_ = CreateWindowExW(0, L"STATIC", L"",
+                                            WS_CHILD | WS_VISIBLE | SS_LEFT |
+                                            SS_CENTERIMAGE | SS_NOTIFY | SS_NOPREFIX,
+                                            78, 164, 774, 24, window_,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_COMPRESSED_LABEL)),
+                                            instance_, nullptr);
         resolutionCombo_ = CreateCombo(IDC_RESOLUTION_SETUP, 48, 232, 300);
         fpsCombo_ = CreateCombo(IDC_FPS_SETUP, 366, 232, 142);
         formatCombo_ = CreateCombo(IDC_FORMAT_SETUP, 526, 232, 326);
-        formatNotice_ = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE,
-                                        48, 270, 804, 36, window_,
+        formatNotice_ = CreateWindowExW(0, L"STATIC", L"",
+                                        WS_CHILD | WS_VISIBLE | SS_LEFT |
+                                        SS_CENTERIMAGE | SS_NOPREFIX | SS_ENDELLIPSIS,
+                                        48, 270, 804, 32, window_,
                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_FORMAT_NOTICE)),
                                         instance_, nullptr);
         audioCombo_ = CreateCombo(IDC_AUDIO, 48, 335, 804);
-        gainCombo_ = CreateCombo(IDC_GAIN, 48, 417, 260);
-        syncCombo_ = CreateCombo(IDC_SYNC, 326, 417, 526);
+        gainCombo_ = CreateCombo(IDC_GAIN, 48, 417, 200);
+        syncCombo_ = CreateCombo(IDC_SYNC, 266, 417, 280);
+        frameGenerationCombo_ = CreateCombo(IDC_FRAME_GENERATION, 564, 417, 288);
         languageCombo_ = CreateCombo(IDC_LANGUAGE, 48, 499, 260);
         autoTuneButton_ = CreateWindowExW(0, L"BUTTON", L"",
                                           WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
@@ -1661,8 +2703,10 @@ private:
         githubLink_ = CreateWindowExW(0, L"BUTTON", L"GitHub",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 326, 674, 190, 64, window_,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_GITHUB)), instance_, nullptr);
-        HWND controls[] = {videoCombo_, resolutionCombo_, fpsCombo_, formatCombo_, formatNotice_,
-                           audioCombo_, gainCombo_, syncCombo_, languageCombo_, statusText_,
+        HWND controls[] = {videoCombo_, rescanButton_, compressedCheck_, compressedLabel_,
+                           resolutionCombo_, fpsCombo_, formatCombo_, formatNotice_,
+                           audioCombo_, gainCombo_, syncCombo_, frameGenerationCombo_,
+                           languageCombo_, statusText_,
                            autoTuneButton_, kofiLink_, githubLink_};
         for (HWND control : controls) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
@@ -1675,6 +2719,7 @@ private:
         ComboBox_AddString(languageCombo_, L"Español");
         ComboBox_AddString(languageCombo_, L"English");
         ComboBox_SetCurSel(languageCombo_, language_ == AppLanguage::English ? 1 : 0);
+        Button_SetCheck(compressedCheck_, BST_UNCHECKED);
         ApplyLanguage();
     }
 
@@ -1693,7 +2738,12 @@ private:
         ComboBox_AddString(syncCombo_, Tr(language_,
             L"VSync (cola máxima: 1 cuadro)", L"VSync (maximum queue: 1 frame)"));
         ComboBox_SetCurSel(syncCombo_, std::min(syncSelection, 1));
+        PopulateFrameGenerationSelector();
         ComboBox_SetCurSel(languageCombo_, language_ == AppLanguage::English ? 1 : 0);
+        SetWindowTextW(rescanButton_, Tr(language_, L"REESCANEAR", L"RESCAN"));
+        SetWindowTextW(compressedLabel_, Tr(language_,
+            L"Habilitar MJPEG/H.264 (compatibilidad comprimida)",
+            L"Enable MJPEG/H.264 (compressed compatibility)"));
         if (audioCombo_ && ComboBox_GetCount(audioCombo_) > 0) {
             const int selected = ComboBox_GetCurSel(audioCombo_);
             ComboBox_DeleteString(audioCombo_, 0);
@@ -1705,6 +2755,38 @@ private:
         InvalidateRect(window_, nullptr, TRUE);
         if (startButton_) InvalidateRect(startButton_, nullptr, TRUE);
         if (autoTuneButton_) InvalidateRect(autoTuneButton_, nullptr, TRUE);
+    }
+
+    void PopulateFrameGenerationSelector() {
+        if (!frameGenerationCombo_) return;
+        int selected = ComboBox_GetCurSel(frameGenerationCombo_);
+        if (selected < 0) {
+            selected = GetPrivateProfileIntW(
+                L"capture", L"frame_generation", 0, IniPath().c_str());
+        }
+        selected = std::clamp(selected, 0, 9);
+        ComboBox_ResetContent(frameGenerationCombo_);
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"Desactivado (ruta normal)", L"Off (normal path)"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"NVIDIA OFA · Rendimiento", L"NVIDIA OFA · Performance"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"NVIDIA OFA · Equilibrado", L"NVIDIA OFA · Balanced"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"NVIDIA OFA · Calidad", L"NVIDIA OFA · Quality"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"NVIDIA VFG · Bajo", L"NVIDIA VFG · Low"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"NVIDIA VFG · Medio", L"NVIDIA VFG · Medium"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"NVIDIA VFG · Alto", L"NVIDIA VFG · High"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"AMD AMF FRC · Rendimiento", L"AMD AMF FRC · Performance"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"AMD AMF FRC · Calidad", L"AMD AMF FRC · Quality"));
+        ComboBox_AddString(frameGenerationCombo_, Tr(language_,
+            L"AMD AMF FRC · Máxima", L"AMD AMF FRC · Maximum"));
+        ComboBox_SetCurSel(frameGenerationCombo_, selected);
     }
 
     void PaintSetup() {
@@ -1731,8 +2813,8 @@ private:
             SetTextColor(dc, RGB(139, 151, 169));
             RECT subtitle{50, 74, 852, 104};
             DrawTextW(dc, Tr(language_,
-                      L"Ruta nativa. Siempre el frame más reciente. Cero bloat.",
-                      L"Native path. Always the newest frame. No bloat."), -1,
+                      L"Dayaah Capture 3.4.1",
+                      L"Dayaah Capture 3.4.1"), -1,
                       &subtitle, DT_LEFT | DT_SINGLELINE);
             const wchar_t* labelsEs[] = {L"DISPOSITIVO DE VIDEO", L"MODO DE VIDEO",
                                          L"ENTRADA DE AUDIO", L"AMPLIFICACIÓN", L"IDIOMA"};
@@ -1752,9 +2834,12 @@ private:
             DrawTextW(dc, L"FPS", -1, &fpsLabel, DT_LEFT | DT_SINGLELINE);
             DrawTextW(dc, Tr(language_, L"Formato", L"Format"), -1, &formatLabel, DT_LEFT | DT_SINGLELINE);
             SetTextColor(dc, RGB(139, 151, 169));
-            RECT syncLabel{326, 393, 852, 415};
+            RECT syncLabel{266, 393, 546, 415};
             DrawTextW(dc, Tr(language_, L"SINCRONIZACIÓN", L"SYNCHRONIZATION"), -1,
                       &syncLabel, DT_LEFT | DT_SINGLELINE);
+            RECT frameGenerationLabel{564, 393, 852, 415};
+            DrawTextW(dc, L"NVIDIA FRAME GENERATION", -1,
+                      &frameGenerationLabel, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
             SelectObject(dc, old);
             DeleteObject(titleFont);
         }
@@ -1932,8 +3017,10 @@ private:
                 info.activate = devices[i];
                 info.activate->AddRef();
                 EnumerateVideoModes(info);
-                if (!info.modes.empty()) videoDevices_.push_back(std::move(info));
-                else SafeRelease(info.activate);
+                // El dispositivo se conserva aunque no tenga modos crudos. Asi
+                // la usuaria ve POR QUE no aparece video en vez de pensar que
+                // Dayaah se hizo mensa y fingio que la capturadora no existe.
+                videoDevices_.push_back(std::move(info));
                 devices[i]->Release();
             }
             CoTaskMemFree(devices);
@@ -1964,19 +3051,36 @@ private:
             }
             collection->Release();
         }
-        LogLine(L"Enumerados %zu dispositivos de video y %zu entradas de audio",
-                videoDevices_.size(), audioDevices_.size());
+        std::size_t rawModes = 0;
+        std::size_t compressedModes = 0;
+        for (const auto& device : videoDevices_) for (const auto& mode : device.modes) {
+            if (mode.IsCompressed()) ++compressedModes;
+            else ++rawModes;
+        }
+        LogLine(L"Enumerados %zu dispositivos de video: %zu modos crudos, %zu comprimidos; %zu entradas de audio",
+                videoDevices_.size(), rawModes, compressedModes, audioDevices_.size());
     }
 
     void EnumerateVideoModes(VideoDeviceInfo& device) {
-        // Solo conservamos formatos crudos que sabemos pintar. MJPEG puede salir
-        // anunciado por la capturadora, pero aqui priorizamos la ruta nativa sin
-        // meter decodificacion adicional en medio.
+        // Guardamos los modos crudos Y los comprimidos compatibles. La casilla
+        // de Configuracion decide cuales mostrar; enumerar una sola vez evita
+        // reabrir el dispositivo cada vez que la usuaria cambia esa opcion.
         IMFMediaSource* source = nullptr;
         IMFSourceReader* reader = nullptr;
-        if (FAILED(device.activate->ActivateObject(IID_PPV_ARGS(&source)))) return;
-        if (FAILED(MFCreateSourceReaderFromMediaSource(source, nullptr, &reader))) {
+        HRESULT activateHr = device.activate->ActivateObject(IID_PPV_ARGS(&source));
+        if (FAILED(activateHr)) {
+            device.enumerationError = activateHr;
+            LogLine(L"Enumeracion: '%s' no pudo activarse: %s",
+                    device.name.c_str(), HrText(activateHr).c_str());
+            return;
+        }
+        HRESULT readerHr = MFCreateSourceReaderFromMediaSource(source, nullptr, &reader);
+        if (FAILED(readerHr)) {
+            device.enumerationError = readerHr;
+            LogLine(L"Enumeracion: '%s' no pudo crear Source Reader: %s",
+                    device.name.c_str(), HrText(readerHr).c_str());
             device.activate->ShutdownObject();
+            source->Shutdown();
             source->Release();
             return;
         }
@@ -1987,13 +3091,25 @@ private:
             if (FAILED(hr)) break;
             GUID subtype{};
             UINT32 width = 0, height = 0, num = 0, den = 1;
-            if (SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, &subtype)) && SupportedRawSubtype(subtype) &&
+            if (SUCCEEDED(type->GetGUID(MF_MT_SUBTYPE, &subtype)) && SupportedCaptureSubtype(subtype) &&
                 SUCCEEDED(MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &width, &height)) &&
                 SUCCEEDED(MFGetAttributeRatio(type, MF_MT_FRAME_RATE, &num, &den))) {
-                VideoMode mode{width, height, num, den, subtype, index};
+                UINT32 averageBitrate = 0;
+                type->GetUINT32(MF_MT_AVG_BITRATE, &averageBitrate);
+                VideoMode mode{width, height, num, den, subtype, index, averageBitrate};
                 bool duplicate = std::any_of(device.modes.begin(), device.modes.end(),
                     [&](const VideoMode& existing) { return existing.Key() == mode.Key(); });
-                if (!duplicate) device.modes.push_back(mode);
+                if (!duplicate) {
+                    device.modes.push_back(mode);
+                    LogLine(L"Enumeracion: '%s' modo %lu = %ux%u %.3f fps %s%s",
+                            device.name.c_str(), static_cast<unsigned long>(index), width, height,
+                            mode.Fps(), GuidFormatName(subtype).c_str(),
+                            mode.IsCompressed() ? L" [comprimido]" : L"");
+                }
+            } else {
+                const std::wstring rejected = GuidFormatName(subtype);
+                LogLine(L"Enumeracion: '%s' modo %lu rechazado (%s)",
+                        device.name.c_str(), static_cast<unsigned long>(index), rejected.c_str());
             }
             type->Release();
         }
@@ -2005,15 +3121,57 @@ private:
         });
         reader->Release();
         device.activate->ShutdownObject();
+        source->Shutdown();
         source->Release();
+    }
+
+    std::wstring RuntimeModeKey(int deviceIndex, const VideoMode& mode) const {
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(videoDevices_.size())) {
+            return mode.Key();
+        }
+        return videoDevices_[deviceIndex].name + L"|" + mode.Key();
+    }
+
+    bool ModeVisible(int deviceIndex, const VideoMode& mode) const {
+        if (mode.IsCompressed() && !allowCompressed_) return false;
+        return incompatibleModes_.find(RuntimeModeKey(deviceIndex, mode)) == incompatibleModes_.end();
+    }
+
+    std::size_t VisibleModeCount(int deviceIndex) const {
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(videoDevices_.size())) return 0;
+        return static_cast<std::size_t>(std::count_if(
+            videoDevices_[deviceIndex].modes.begin(), videoDevices_[deviceIndex].modes.end(),
+            [&](const VideoMode& mode) { return ModeVisible(deviceIndex, mode); }));
+    }
+
+    std::size_t RawModeCount(int deviceIndex) const {
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(videoDevices_.size())) return 0;
+        return static_cast<std::size_t>(std::count_if(
+            videoDevices_[deviceIndex].modes.begin(), videoDevices_[deviceIndex].modes.end(),
+            [](const VideoMode& mode) { return !mode.IsCompressed(); }));
+    }
+
+    std::size_t CompressedModeCount(int deviceIndex) const {
+        if (deviceIndex < 0 || deviceIndex >= static_cast<int>(videoDevices_.size())) return 0;
+        return static_cast<std::size_t>(std::count_if(
+            videoDevices_[deviceIndex].modes.begin(), videoDevices_[deviceIndex].modes.end(),
+            [](const VideoMode& mode) { return mode.IsCompressed(); }));
     }
 
     void PopulateControls() {
         ComboBox_ResetContent(videoCombo_);
+        Button_SetCheck(compressedCheck_, allowCompressed_ ? BST_CHECKED : BST_UNCHECKED);
         const std::wstring savedVideo = ReadSetting(L"video_device", L"");
         int preferredVideo = 0;
         for (size_t i = 0; i < videoDevices_.size(); ++i) {
-            ComboBox_AddString(videoCombo_, videoDevices_[i].name.c_str());
+            std::wstring label = videoDevices_[i].name;
+            const std::size_t raw = RawModeCount(static_cast<int>(i));
+            const std::size_t compressed = CompressedModeCount(static_cast<int>(i));
+            if (!raw && compressed) label += Tr(language_,
+                L"  [solo formatos comprimidos]", L"  [compressed formats only]");
+            else if (!raw && !compressed) label += Tr(language_,
+                L"  [no disponible]", L"  [unavailable]");
+            ComboBox_AddString(videoCombo_, label.c_str());
             if (!savedVideo.empty() && videoDevices_[i].name == savedVideo) {
                 preferredVideo = static_cast<int>(i);
             }
@@ -2052,20 +3210,46 @@ private:
             GetPrivateProfileIntW(L"capture", L"input_full_range", 0,
                                   IniPath().c_str()) == 1);
 
+        const std::size_t visibleModes = VisibleModeCount(preferredVideo);
         if (videoDevices_.empty()) {
             SetWindowTextW(statusText_, Tr(language_,
-                L"No encontré una capturadora con un formato compatible.",
-                L"No capture card with a compatible format was found."));
+                L"No encontré ninguna capturadora. Conéctala y pulsa Buscar de nuevo.",
+                L"No capture device was found. Connect it and press Rescan."));
+            EnableWindow(startButton_, FALSE);
+            EnableWindow(autoTuneButton_, FALSE);
+        } else if (!visibleModes) {
+            const bool hasCompressed = CompressedModeCount(preferredVideo) > 0;
+            SetWindowTextW(statusText_, hasCompressed && !allowCompressed_
+                ? Tr(language_,
+                    L"Esta capturadora solo ofrece MJPEG/H.264. Activa la casilla de compatibilidad para usarla.",
+                    L"This device only offers MJPEG/H.264. Enable compatibility to use it.")
+                : Tr(language_,
+                    L"El dispositivo no anunció un modo compatible. Revisa el log o vuelve a buscar.",
+                    L"The device did not advertise a compatible mode. Check the log or rescan."));
             EnableWindow(startButton_, FALSE);
             EnableWindow(autoTuneButton_, FALSE);
         } else {
             EnableWindow(startButton_, TRUE);
             EnableWindow(autoTuneButton_, TRUE);
-            wchar_t status[180]{};
+            wchar_t status[320]{};
+            const FrameGenerationMode frameGeneration = SelectedFrameGenerationMode();
+            const wchar_t* frameGenerationNotice = frameGeneration == FrameGenerationMode::Off
+                ? L""
+                : FrameGenerationIsAmdFrc(frameGeneration)
+                    ? Tr(language_,
+                        L" · AMD AMF FRC 2x agrega latencia de interpolación.",
+                        L" · AMD AMF FRC 2x adds interpolation latency.")
+                : FrameGenerationIsVfg(frameGeneration)
+                    ? Tr(language_,
+                        L" · NVIDIA VFG 2x agrega latencia de interpolación.",
+                        L" · NVIDIA VFG 2x adds interpolation latency.")
+                    : Tr(language_,
+                        L" · NVIDIA OFA 2x agrega latencia de interpolación.",
+                        L" · NVIDIA OFA 2x adds interpolation latency.");
             _snwprintf_s(status, _countof(status), _TRUNCATE, language_ == AppLanguage::English
-                ? L"Ready: %zu raw modes. F8: latency · F9: pacing · F11: fullscreen · F12: PiP · M: mute"
-                : L"Listo: %zu modos crudos. F8: latencia · F9: pacing · F11: pantalla completa · F12: PiP · M: silencio",
-                videoDevices_[preferredVideo].modes.size());
+                ? L"Ready: %zu visible modes. F8: latency · F9: pacing · F11: fullscreen · F12: PiP · M: mute%s"
+                : L"Listo: %zu modos visibles. F8: latencia · F9: pacing · F11: pantalla completa · F12: PiP · M: silencio%s",
+                visibleModes, frameGenerationNotice);
             SetWindowTextW(statusText_, status);
         }
         UpdateFormatNotice();
@@ -2079,6 +3263,7 @@ private:
         int bestScore = -1;
         for (size_t i = 0; i < videoDevices_[video].modes.size(); ++i) {
             const VideoMode& mode = videoDevices_[video].modes[i];
+            if (!ModeVisible(video, mode)) continue;
             int score = 0;
             if (mode.width == 1920 && mode.height == 1080) score += 100;
             if (std::fabs(mode.Fps() - 60.0) < 0.1) score += 50;
@@ -2106,6 +3291,7 @@ private:
             preferredMode = DefaultModeIndex(video);
         }
         for (const VideoMode& mode : modes) {
+            if (!ModeVisible(video, mode)) continue;
             const auto value = std::make_pair(mode.width, mode.height);
             if (std::find(setupResolutions_.begin(), setupResolutions_.end(), value) == setupResolutions_.end()) {
                 setupResolutions_.push_back(value);
@@ -2134,6 +3320,7 @@ private:
             resolution < 0 || resolution >= static_cast<int>(setupResolutions_.size())) return;
         const auto selectedResolution = setupResolutions_[resolution];
         for (const VideoMode& mode : videoDevices_[video].modes) {
+            if (!ModeVisible(video, mode)) continue;
             if (mode.width != selectedResolution.first || mode.height != selectedResolution.second) continue;
             if (std::none_of(setupFps_.begin(), setupFps_.end(),
                 [&](double fps) { return std::fabs(fps - mode.Fps()) < 0.01; })) {
@@ -2163,12 +3350,15 @@ private:
             fps < 0 || fps >= static_cast<int>(setupFps_.size())) return;
         const auto selectedResolution = setupResolutions_[resolution];
         for (const VideoMode& mode : videoDevices_[video].modes) {
+            if (!ModeVisible(video, mode)) continue;
             if (mode.width != selectedResolution.first || mode.height != selectedResolution.second ||
                 std::fabs(mode.Fps() - setupFps_[fps]) >= 0.01) continue;
             if (std::none_of(setupFormats_.begin(), setupFormats_.end(),
                              [&](const GUID& value) { return value == mode.subtype; })) {
                 setupFormats_.push_back(mode.subtype);
-                ComboBox_AddString(formatCombo_, GuidFormatName(mode.subtype).c_str());
+                std::wstring label = GuidFormatName(mode.subtype);
+                if (mode.IsCompressed()) label += Tr(language_, L" (compatibilidad)", L" (compatibility)");
+                ComboBox_AddString(formatCombo_, label.c_str());
             }
         }
         int selected = 0;
@@ -2191,6 +3381,7 @@ private:
         const auto selectedResolution = setupResolutions_[resolution];
         for (size_t i = 0; i < videoDevices_[video].modes.size(); ++i) {
             const VideoMode& mode = videoDevices_[video].modes[i];
+            if (!ModeVisible(video, mode)) continue;
             if (mode.width == selectedResolution.first && mode.height == selectedResolution.second &&
                 std::fabs(mode.Fps() - setupFps_[fps]) < 0.01 && mode.subtype == setupFormats_[format]) {
                 return static_cast<int>(i);
@@ -2205,6 +3396,65 @@ private:
             ? FormatNotice(setupFormats_[format], language_) : L"");
     }
 
+    void UpdateSetupAvailability() {
+        const int device = ComboBox_GetCurSel(videoCombo_);
+        const std::size_t visible = VisibleModeCount(device);
+        const bool ready = device >= 0 && visible > 0 && SelectedModeIndex() >= 0;
+        EnableWindow(startButton_, ready ? TRUE : FALSE);
+        EnableWindow(autoTuneButton_, ready ? TRUE : FALSE);
+        if (device < 0 || device >= static_cast<int>(videoDevices_.size())) return;
+        if (!visible && CompressedModeCount(device) > 0 && !allowCompressed_) {
+            SetWindowTextW(statusText_, Tr(language_,
+                L"Solo encontré formatos comprimidos. Activa la casilla MJPEG/H.264 para continuar.",
+                L"Only compressed formats were found. Enable MJPEG/H.264 compatibility to continue."));
+        } else if (!visible) {
+            SetWindowTextW(statusText_, Tr(language_,
+                L"No hay modos utilizables para este dispositivo. Revisa DayaahCapture.log.",
+                L"This device has no usable modes. Check DayaahCapture.log."));
+        } else {
+            wchar_t status[320]{};
+            const FrameGenerationMode frameGeneration = SelectedFrameGenerationMode();
+            const wchar_t* frameGenerationNotice = frameGeneration == FrameGenerationMode::Off
+                ? L""
+                : FrameGenerationIsAmdFrc(frameGeneration)
+                    ? Tr(language_,
+                        L" · AMD AMF FRC 2x agrega latencia de interpolación.",
+                        L" · AMD AMF FRC 2x adds interpolation latency.")
+                : FrameGenerationIsVfg(frameGeneration)
+                    ? Tr(language_,
+                        L" · NVIDIA VFG 2x agrega latencia de interpolación.",
+                        L" · NVIDIA VFG 2x adds interpolation latency.")
+                    : Tr(language_,
+                        L" · NVIDIA OFA 2x agrega latencia de interpolación.",
+                        L" · NVIDIA OFA 2x adds interpolation latency.");
+            _snwprintf_s(status, _countof(status), _TRUNCATE,
+                language_ == AppLanguage::English
+                    ? L"Ready: %zu visible modes (%zu raw, %zu compressed).%s"
+                    : L"Listo: %zu modos visibles (%zu crudos, %zu comprimidos).%s",
+                visible, RawModeCount(device), CompressedModeCount(device),
+                frameGenerationNotice);
+            SetWindowTextW(statusText_, status);
+        }
+    }
+
+    void RescanDevices() {
+        if (running_.load()) return;
+        SetWindowTextW(statusText_, Tr(language_,
+            L"Buscando capturadoras y modos de video...",
+            L"Scanning capture devices and video modes..."));
+        EnableWindow(rescanButton_, FALSE);
+        SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+        UpdateWindow(window_);
+        ReleaseDevices();
+        incompatibleModes_.clear();
+        softwareDecoderModes_.clear();
+        EnumerateDevices();
+        PopulateControls();
+        EnableWindow(rescanButton_, TRUE);
+        SetCursor(visibleCursor_);
+        LogLine(L"Reescaneo manual completado");
+    }
+
     LRESULT OnCommand(int id, int notification) {
         if ((id == IDC_KOFI || id == IDC_GITHUB) && notification == BN_CLICKED) {
             ShellExecuteW(window_, L"open", id == IDC_KOFI ? kKofiUrl : kGithubUrl,
@@ -2215,8 +3465,28 @@ private:
             RunAutoTune();
             return 0;
         }
+        if (id == IDC_RESCAN && notification == BN_CLICKED) {
+            RescanDevices();
+            return 0;
+        }
+        if (id == IDC_COMPRESSED_LABEL && notification == STN_CLICKED) {
+            const bool checked = Button_GetCheck(compressedCheck_) == BST_CHECKED;
+            Button_SetCheck(compressedCheck_, checked ? BST_UNCHECKED : BST_CHECKED);
+            id = IDC_COMPRESSED;
+            notification = BN_CLICKED;
+        }
+        if (id == IDC_COMPRESSED && notification == BN_CLICKED) {
+            allowCompressed_ = Button_GetCheck(compressedCheck_) == BST_CHECKED;
+            WritePrivateProfileStringW(L"capture", L"allow_compressed",
+                                       allowCompressed_ ? L"1" : L"0", IniPath().c_str());
+            PopulateModeSelectors(ComboBox_GetCurSel(videoCombo_), -1);
+            UpdateSetupAvailability();
+            LogLine(L"Formatos comprimidos: %s", allowCompressed_ ? L"permitidos" : L"ocultos");
+            return 0;
+        }
         if (id == IDC_VIDEO && notification == CBN_SELCHANGE) {
             PopulateModeSelectors(ComboBox_GetCurSel(videoCombo_), -1);
+            UpdateSetupAvailability();
             return 0;
         }
         if (id == IDC_RESOLUTION_SETUP && notification == CBN_SELCHANGE) {
@@ -2231,6 +3501,7 @@ private:
                 wantedFormat = &wanted;
             }
             PopulateFpsForResolution(ComboBox_GetCurSel(videoCombo_), wantedFps, wantedFormat);
+            UpdateSetupAvailability();
             return 0;
         }
         if (id == IDC_FPS_SETUP && notification == CBN_SELCHANGE) {
@@ -2242,10 +3513,21 @@ private:
                 wantedFormat = &wanted;
             }
             PopulateFormatsForFps(ComboBox_GetCurSel(videoCombo_), wantedFormat);
+            UpdateSetupAvailability();
             return 0;
         }
         if (id == IDC_FORMAT_SETUP && notification == CBN_SELCHANGE) {
             UpdateFormatNotice();
+            UpdateSetupAvailability();
+            return 0;
+        }
+        if (id == IDC_FRAME_GENERATION && notification == CBN_SELCHANGE) {
+            const int selected = std::max(0, ComboBox_GetCurSel(frameGenerationCombo_));
+            const std::wstring value = std::to_wstring(selected);
+            WritePrivateProfileStringW(L"capture", L"frame_generation",
+                                       value.c_str(), IniPath().c_str());
+            UpdateSetupAvailability();
+            LogLine(L"Frame Generation solicitado: %d", selected);
             return 0;
         }
         if (id == IDC_LANGUAGE && notification == CBN_SELCHANGE) {
@@ -2285,7 +3567,15 @@ private:
         if (subtype == MFVideoFormat_I420) return 3;
         if (subtype == MFVideoFormat_P010) return 4;
         if (subtype == MFVideoFormat_RGB32) return 5;
+        if (subtype == MFVideoFormat_MJPG) return 6;
+        if (subtype == MFVideoFormat_H264) return 7;
         return 0;
+    }
+
+    static double EstimatedModeBandwidthMiB(const VideoMode& mode) {
+        return mode.averageBitrate
+            ? static_cast<double>(mode.averageBitrate) / 8.0 / (1024.0 * 1024.0)
+            : 0.0;
     }
 
     int ClosestModeIndex(const ModeCandidate& requested, ModeAxis axis) const {
@@ -2293,13 +3583,21 @@ private:
             activeDeviceIndex_ >= static_cast<int>(videoDevices_.size())) return -1;
         const auto& modes = videoDevices_[activeDeviceIndex_].modes;
         std::vector<ModeCandidate> candidates;
+        std::vector<int> modeIndices;
         candidates.reserve(modes.size());
-        for (const VideoMode& mode : modes) {
-            candidates.push_back({mode.width, mode.height, mode.Fps(), FormatCode(mode.subtype)});
+        modeIndices.reserve(modes.size());
+        for (std::size_t i = 0; i < modes.size(); ++i) {
+            const VideoMode& mode = modes[i];
+            if (!ModeVisible(activeDeviceIndex_, mode)) continue;
+            candidates.push_back({mode.width, mode.height, mode.Fps(), FormatCode(mode.subtype),
+                                  EstimatedModeBandwidthMiB(mode)});
+            modeIndices.push_back(static_cast<int>(i));
         }
         const ModeCandidate current{activeMode_.width, activeMode_.height,
                                     activeMode_.Fps(), FormatCode(activeMode_.subtype)};
-        return SelectClosestMode(candidates, current, requested, axis);
+        const int candidate = SelectClosestMode(candidates, current, requested, axis);
+        return candidate >= 0 && candidate < static_cast<int>(modeIndices.size())
+            ? modeIndices[candidate] : -1;
     }
 
     void SwitchCaptureMode(int modeIndex) {
@@ -2360,6 +3658,7 @@ private:
 
         const auto& modes = videoDevices_[activeDeviceIndex_].modes;
         for (const VideoMode& mode : modes) {
+            if (!ModeVisible(activeDeviceIndex_, mode)) continue;
             const auto resolution = std::make_pair(mode.width, mode.height);
             if (std::find(menuResolutions_.begin(), menuResolutions_.end(), resolution) ==
                 menuResolutions_.end()) {
@@ -2415,6 +3714,8 @@ private:
             else if (menuFormats_[i] == MFVideoFormat_I420) label += L" (CPU)";
             else if (menuFormats_[i] == MFVideoFormat_P010) label += L" (10-bit)";
             else if (menuFormats_[i] == MFVideoFormat_RGB32) label += Tr(language_, L" (ancho de banda alto)", L" (high bandwidth)");
+            else if (CompressedSubtype(menuFormats_[i])) label += Tr(language_,
+                L" (compatibilidad comprimida)", L" (compressed compatibility)");
             entry(formatMenu, IDM_FORMAT + static_cast<UINT>(i), label.c_str(),
                   activeMode_.subtype == menuFormats_[i]);
         }
@@ -2423,7 +3724,7 @@ private:
                     Tr(language_, L"Resolución", L"Resolution"));
         AppendMenuW(modeMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(fpsMenu), L"FPS");
         AppendMenuW(modeMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(formatMenu),
-                    Tr(language_, L"Formato crudo", L"Raw format"));
+                    Tr(language_, L"Formato de captura", L"Capture format"));
         AppendMenuW(root, MF_POPUP, reinterpret_cast<UINT_PTR>(modeMenu),
                     Tr(language_, L"Modo de video (reinicia captura)", L"Video mode (restarts capture)"));
     }
@@ -2478,14 +3779,21 @@ private:
                         Tr(language_, L"Rango de color de entrada", L"Input color range"));
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        const bool effectsPaused = VisualEffectsPaused();
         entry(menu, IDM_EFFECTS_TOGGLE, Tr(language_,
-              pictureInPicture_ ? L"Efectos pausados durante PiP" : L"Activar efectos de video\tF6",
-              pictureInPicture_ ? L"Effects paused during PiP" : L"Enable video effects\tF6"),
-              effectsSettings_.enabled, !pictureInPicture_);
+              effectsPaused
+                ? (pictureInPicture_ ? L"Efectos pausados durante PiP"
+                                     : L"Efectos pausados por Frame Generation")
+                : L"Activar efectos de video\tF6",
+              effectsPaused
+                ? (pictureInPicture_ ? L"Effects paused during PiP"
+                                     : L"Effects paused by Frame Generation")
+                : L"Enable video effects\tF6"),
+              effectsSettings_.enabled, !effectsPaused);
         entry(menu, IDM_EFFECTS_EDITOR,
               Tr(language_, L"Ajustar nitidez, color y CRT...\tF7",
                             L"Adjust sharpening, color and CRT...\tF7"),
-              false, !pictureInPicture_);
+              false, !effectsPaused);
         entry(menu, IDM_LATENCY_HUD, Tr(language_, L"Latencia aproximada\tF8", L"Estimated latency\tF8"),
               latencyHudEnabled_.load());
         entry(menu, IDM_PACING_SCOPE, Tr(language_, L"Osciloscopio de frame pacing\tF9",
@@ -2573,9 +3881,9 @@ private:
             LogLine(L"Sincronización cambiada en vivo: %s",
                     newLowLatency ? L"VSync OFF / intervalo 0" : L"VSync ON / intervalo 1");
         } else if (id == IDM_EFFECTS_TOGGLE) {
-            if (!pictureInPicture_) ToggleEffects();
+            if (!VisualEffectsPaused()) ToggleEffects();
         } else if (id == IDM_EFFECTS_EDITOR) {
-            if (!pictureInPicture_) OpenEffectsEditor();
+            if (!VisualEffectsPaused()) OpenEffectsEditor();
         } else if (id == IDM_LATENCY_HUD) {
             ToggleLatencyHud();
         } else if (id == IDM_PACING_SCOPE) {
@@ -2656,17 +3964,24 @@ private:
         if (deviceIndex < 0 || deviceIndex >= static_cast<int>(videoDevices_.size())) return;
         const auto& modes = videoDevices_[deviceIndex].modes;
         std::vector<ModeCandidate> candidates;
+        std::vector<int> candidateModeIndices;
         candidates.reserve(modes.size());
-        for (const VideoMode& mode : modes) {
-            candidates.push_back({mode.width, mode.height, mode.Fps(), FormatCode(mode.subtype)});
+        candidateModeIndices.reserve(modes.size());
+        for (std::size_t i = 0; i < modes.size(); ++i) {
+            const VideoMode& mode = modes[i];
+            if (!ModeVisible(deviceIndex, mode)) continue;
+            candidates.push_back({mode.width, mode.height, mode.Fps(), FormatCode(mode.subtype),
+                                  EstimatedModeBandwidthMiB(mode)});
+            candidateModeIndices.push_back(static_cast<int>(i));
         }
         const AutoTuneDecision decision = SelectAutoTuneMode(candidates, CurrentDisplayTarget());
-        if (decision.index < 0 || decision.index >= static_cast<int>(modes.size())) {
+        if (decision.index < 0 || decision.index >= static_cast<int>(candidateModeIndices.size())) {
             MessageBoxW(window_, Tr(language_,
-                L"AutoTune no encontró un modo crudo compatible.",
-                L"AutoTune could not find a compatible raw mode."), kAppTitle, MB_ICONWARNING);
+                L"AutoTune no encontró un modo compatible.",
+                L"AutoTune could not find a compatible mode."), kAppTitle, MB_ICONWARNING);
             return;
         }
+        const int selectedModeIndex = candidateModeIndices[decision.index];
 
         const bool wasRunning = running_.load();
         const bool wasMuted = audio_.IsMuted();
@@ -2680,11 +3995,11 @@ private:
         }
 
         ComboBox_SetCurSel(videoCombo_, deviceIndex);
-        PopulateModeSelectors(deviceIndex, decision.index);
+        PopulateModeSelectors(deviceIndex, selectedModeIndex);
         ComboBox_SetCurSel(syncCombo_, 0);
         HRESULT hr = StartCapture();
         bool restoredPrevious = false;
-        if (FAILED(hr) && wasRunning && previousMode >= 0 && previousMode != decision.index) {
+        if (FAILED(hr) && wasRunning && previousMode >= 0 && previousMode != selectedModeIndex) {
             LogLine(L"AutoTune: el modo recomendado fallo; restaurando el anterior");
             PopulateModeSelectors(deviceIndex, previousMode);
             ComboBox_SetCurSel(syncCombo_, previousLowLatency ? 0 : 1);
@@ -2848,6 +4163,13 @@ private:
             return;
         }
 
+        if (lastStartFailureDeterministic_) {
+            recoveryInProgress_ = false;
+            LogLine(L"Phoenix no reintentará un fallo determinista del decoder");
+            AbandonRecovery(hr);
+            return;
+        }
+
         recoveryInProgress_ = false;
         recoveryReason_ = hr;
         if (PhoenixMayAttemptRecovery(recoveryAttempts_)) {
@@ -2871,7 +4193,18 @@ private:
         const ULONGLONG now = GetTickCount64();
         if (running_.load() && !recoveryPending_ && !recoveryInProgress_) {
             const ULONGLONG lastFrame = lastFrameArrivalTick_.load();
-            if (lastFrame && now > lastFrame && now - lastFrame > 1800) {
+            const ULONGLONG started = captureStartedTick_.load();
+            const bool waitingCompressedFirstFrame = compressedMode_ &&
+                !decodedFormatValidated_.load();
+            const ULONGLONG timeoutMs = waitingCompressedFirstFrame ? 5000 : 1800;
+            if (!lastFrame && started && now > started && now - started > timeoutMs) {
+                LogLine(L"Timeout esperando primer frame: ruta=%s, samples_invalidos=%u, ultimo_sample=%llu ms",
+                        waitingCompressedFirstFrame ? L"comprimida" : L"cruda",
+                        consecutiveInvalidSamples_.load(),
+                        lastSampleArrivalTick_.load() && now >= lastSampleArrivalTick_.load()
+                            ? now - lastSampleArrivalTick_.load() : 0);
+                ScheduleRecovery(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
+            } else if (lastFrame && now > lastFrame && now - lastFrame > 1800) {
                 ScheduleRecovery(HRESULT_FROM_WIN32(ERROR_TIMEOUT));
             } else if (recoveryAttempts_ > 0 && recoveryStableSince_ &&
                        now - recoveryStableSince_ > 10000) {
@@ -2923,7 +4256,7 @@ private:
         settings.Sanitize();
         effectsSettings_ = settings;
         VideoEffects runtimeSettings = settings;
-        runtimeSettings.enabled = ShouldApplyVisualEffects(settings.enabled, pictureInPicture_);
+        runtimeSettings.enabled = ShouldApplyVisualEffects(settings.enabled, VisualEffectsPaused());
         effectsPacked_.store(runtimeSettings.Pack(), std::memory_order_relaxed);
         effectsEditor_.Sync(settings);
         effectsDirty_ = true;
@@ -2959,6 +4292,12 @@ private:
     }
 
     void ToggleDiscoMode() {
+        if (renderer_ && renderer_->FrameGenerationActive()) {
+            ShowViewerNotice(Tr(language_,
+                L"El modo disco se pausa mientras Frame Generation está activo.",
+                L"Disco mode is paused while Frame Generation is active."), 3500);
+            return;
+        }
         if (!renderer_ || !renderer_->SupportsDiscoMode()) {
             LogLine(L"Modo disco RGB no compatible con el procesador de video actual");
             MessageBoxW(window_, Tr(language_,
@@ -3092,6 +4431,225 @@ private:
         return ComboBox_GetCurSel(syncCombo_) != 1;
     }
 
+    FrameGenerationMode SelectedFrameGenerationMode() const {
+        return FrameGenerationModeFromInt(ComboBox_GetCurSel(frameGenerationCombo_));
+    }
+
+    static FormatValidation ParseDecodedFormat(IMFMediaType* type, DecodedFormat& format) {
+        format = {};
+        if (!type) return FormatValidation::Invalid;
+        if (FAILED(type->GetGUID(MF_MT_SUBTYPE, &format.subtype)) ||
+            (format.subtype != MFVideoFormat_NV12 && format.subtype != MFVideoFormat_YUY2)) {
+            return FormatValidation::Invalid;
+        }
+
+        if (FAILED(MFGetAttributeSize(type, MF_MT_FRAME_SIZE,
+                                      &format.codedWidth, &format.codedHeight)) ||
+            !format.codedWidth || !format.codedHeight) {
+            // H.264 puede no saberlo antes de leer SPS. No lo condenamos por
+            // eso: el primer sample o CURRENTMEDIATYPECHANGED completa el dato.
+            return FormatValidation::Unknown;
+        }
+
+        format.visibleWidth = format.codedWidth;
+        format.visibleHeight = format.codedHeight;
+        UINT32 apertureBytes = 0;
+        const HRESULT apertureSizeHr = type->GetBlobSize(
+            MF_MT_MINIMUM_DISPLAY_APERTURE, &apertureBytes);
+        if (SUCCEEDED(apertureSizeHr)) {
+            if (apertureBytes < sizeof(MFVideoArea)) return FormatValidation::Invalid;
+            MFVideoArea aperture{};
+            UINT32 copied = 0;
+            if (FAILED(type->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE,
+                                     reinterpret_cast<UINT8*>(&aperture),
+                                     sizeof(aperture), &copied)) ||
+                copied < sizeof(aperture) || aperture.OffsetX.fract || aperture.OffsetY.fract ||
+                aperture.OffsetX.value < 0 || aperture.OffsetY.value < 0 ||
+                aperture.Area.cx <= 0 || aperture.Area.cy <= 0) {
+                return FormatValidation::Invalid;
+            }
+            format.apertureX = static_cast<UINT32>(aperture.OffsetX.value);
+            format.apertureY = static_cast<UINT32>(aperture.OffsetY.value);
+            format.visibleWidth = static_cast<UINT32>(aperture.Area.cx);
+            format.visibleHeight = static_cast<UINT32>(aperture.Area.cy);
+            format.apertureSpecified = true;
+        }
+
+        if (format.apertureX > format.codedWidth ||
+            format.visibleWidth > format.codedWidth - format.apertureX ||
+            format.apertureY > format.codedHeight ||
+            format.visibleHeight > format.codedHeight - format.apertureY) {
+            return FormatValidation::Invalid;
+        }
+        if (format.subtype == MFVideoFormat_NV12 &&
+            ((format.codedWidth | format.codedHeight | format.visibleWidth |
+              format.visibleHeight | format.apertureX | format.apertureY) & 1u)) {
+            return FormatValidation::Invalid;
+        }
+        if (format.subtype == MFVideoFormat_YUY2 &&
+            ((format.codedWidth | format.visibleWidth | format.apertureX) & 1u)) {
+            return FormatValidation::Invalid;
+        }
+
+        UINT32 strideBits = 0;
+        if (SUCCEEDED(type->GetUINT32(MF_MT_DEFAULT_STRIDE, &strideBits))) {
+            format.stride = static_cast<LONG>(strideBits);
+        } else {
+            format.stride = static_cast<LONG>(TightRowPitch(format.subtype,
+                                                             format.codedWidth));
+        }
+        const UINT32 minimumStride = TightRowPitch(format.subtype, format.codedWidth);
+        if (format.stride <= 0 || static_cast<UINT32>(format.stride) < minimumStride) {
+            return FormatValidation::Invalid;
+        }
+        return FormatValidation::Valid;
+    }
+
+    bool DecodedFormatMatchesActiveMode(const DecodedFormat& format) const {
+        return format.visibleWidth == activeMode_.width &&
+               format.visibleHeight == activeMode_.height &&
+               (format.subtype == MFVideoFormat_NV12 || format.subtype == MFVideoFormat_YUY2);
+    }
+
+    void ReleaseDecoderAcceleration() {
+        SafeRelease(dxgiDeviceManager_);
+        SafeRelease(decoderDevice_);
+        dxgiResetToken_ = 0;
+    }
+
+    HRESULT AddDxvaAttributes(IMFAttributes* attributes) {
+        if (!attributes) return E_POINTER;
+        ReleaseDecoderAcceleration();
+        ID3D11DeviceContext* context = nullptr;
+        D3D_FEATURE_LEVEL obtained{};
+        const D3D_FEATURE_LEVEL levels[] = {
+            D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0
+        };
+        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            levels, _countof(levels), D3D11_SDK_VERSION,
+            &decoderDevice_, &obtained, &context);
+        SafeRelease(context);
+        if (SUCCEEDED(hr)) hr = MFCreateDXGIDeviceManager(&dxgiResetToken_, &dxgiDeviceManager_);
+        if (SUCCEEDED(hr)) hr = dxgiDeviceManager_->ResetDevice(decoderDevice_, dxgiResetToken_);
+        if (SUCCEEDED(hr)) hr = attributes->SetUnknown(
+            MF_SOURCE_READER_D3D_MANAGER, dxgiDeviceManager_);
+        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(
+            MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_SOURCE_READER_DISABLE_DXVA, FALSE);
+        if (FAILED(hr)) ReleaseDecoderAcceleration();
+        return hr;
+    }
+
+    HRESULT SelectNativeMode(IMFSourceReader* reader, IMFMediaType* selectedType) {
+        if (!reader || !selectedType) return E_POINTER;
+        IMFSourceReaderEx* extended = nullptr;
+        HRESULT hr = reader->QueryInterface(IID_PPV_ARGS(&extended));
+        if (SUCCEEDED(hr)) {
+            DWORD flags = 0;
+            hr = extended->SetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                              selectedType, &flags);
+            extended->Release();
+        }
+        // Drivers viejos pueden no exponer IMFSourceReaderEx. Seleccionar el
+        // tipo nativo como salida sigue configurando el pin antes del decoder.
+        if (FAILED(hr)) {
+            hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                             nullptr, selectedType);
+        }
+        return hr;
+    }
+
+    HRESULT ConfigureReaderOutput(IMFSourceReader* reader, DecodedFormat& decoded,
+                                  FormatValidation& validation) {
+        IMFMediaType* selectedType = nullptr;
+        HRESULT hr = reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                                activeMode_.nativeIndex, &selectedType);
+        if (SUCCEEDED(hr)) hr = SelectNativeMode(reader, selectedType);
+        if (FAILED(hr)) {
+            SafeRelease(selectedType);
+            return hr;
+        }
+
+        if (!activeMode_.IsCompressed()) {
+            hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                                             nullptr, selectedType);
+            SafeRelease(selectedType);
+            if (SUCCEEDED(hr)) {
+                decoded = {activeMode_.subtype, activeMode_.width, activeMode_.height,
+                           activeMode_.width, activeMode_.height, 0, 0,
+                           static_cast<LONG>(TightRowPitch(activeMode_.subtype,
+                                                           activeMode_.width)), false};
+                validation = FormatValidation::Valid;
+            }
+            return hr;
+        }
+
+        const GUID outputs[] = {MFVideoFormat_NV12, MFVideoFormat_YUY2};
+        HRESULT lastHr = MF_E_INVALIDMEDIATYPE;
+        for (const GUID& outputSubtype : outputs) {
+            IMFMediaType* output = nullptr;
+            hr = MFCreateMediaType(&output);
+            if (SUCCEEDED(hr)) hr = output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+            if (SUCCEEDED(hr)) hr = output->SetGUID(MF_MT_SUBTYPE, outputSubtype);
+            if (SUCCEEDED(hr)) hr = MFSetAttributeSize(output, MF_MT_FRAME_SIZE,
+                                                       activeMode_.width, activeMode_.height);
+            if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(output, MF_MT_FRAME_RATE,
+                                                        activeMode_.fpsNum, activeMode_.fpsDen);
+            UINT32 interlace = MFVideoInterlace_Progressive;
+            if (selectedType) selectedType->GetUINT32(MF_MT_INTERLACE_MODE, &interlace);
+            if (SUCCEEDED(hr)) hr = output->SetUINT32(MF_MT_INTERLACE_MODE, interlace);
+            if (SUCCEEDED(hr)) hr = reader->SetCurrentMediaType(
+                MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, output);
+            SafeRelease(output);
+            if (SUCCEEDED(hr)) {
+                lastHr = S_OK;
+                break;
+            }
+            lastHr = hr;
+        }
+        SafeRelease(selectedType);
+        if (FAILED(lastHr)) return lastHr;
+
+        IMFMediaType* current = nullptr;
+        hr = reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &current);
+        if (SUCCEEDED(hr)) validation = ParseDecodedFormat(current, decoded);
+        SafeRelease(current);
+        return hr;
+    }
+
+    HRESULT CreateConfiguredReader(bool requestHardware, IMFSourceReader** result,
+                                   DecodedFormat& decoded, FormatValidation& validation) {
+        if (!result) return E_POINTER;
+        *result = nullptr;
+        IMFAttributes* attributes = nullptr;
+        HRESULT hr = MFCreateAttributes(&attributes, 8);
+        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(kMfLowLatency, TRUE);
+        if (SUCCEEDED(hr)) hr = attributes->SetUnknown(
+            MF_SOURCE_READER_ASYNC_CALLBACK, callback_);
+        if (SUCCEEDED(hr) && !activeMode_.IsCompressed()) {
+            hr = attributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
+        }
+        if (SUCCEEDED(hr) && activeMode_.IsCompressed() && requestHardware) {
+            hr = AddDxvaAttributes(attributes);
+        } else if (!requestHardware) {
+            ReleaseDecoderAcceleration();
+        }
+        IMFSourceReader* candidate = nullptr;
+        if (SUCCEEDED(hr)) hr = MFCreateSourceReaderFromMediaSource(
+            mediaSource_, attributes, &candidate);
+        SafeRelease(attributes);
+        if (SUCCEEDED(hr)) hr = ConfigureReaderOutput(candidate, decoded, validation);
+        if (FAILED(hr)) {
+            SafeRelease(candidate);
+            if (requestHardware) ReleaseDecoderAcceleration();
+            return hr;
+        }
+        *result = candidate;
+        return S_OK;
+    }
+
     static bool IsCaptureDeviceBusy(HRESULT hr) {
         // Algunos drivers dicen "acceso denegado" mientras terminan de soltar
         // el pin de video anterior. Compartir la capturadora con otra app sigue
@@ -3153,9 +4711,16 @@ private:
             recoveryAttempts_ = 0;
         }
         discoSecret_.Reset();
-        IMFAttributes* attributes = nullptr;
-        IMFMediaType* selectedType = nullptr;
         IMFSourceReader* newReader = nullptr;
+        DecodedFormat startDecoded{};
+        FormatValidation startValidation = FormatValidation::Unknown;
+        std::wstring runtimeKey;
+        bool softwareForced = false;
+        bool tryHardware = false;
+        GUID rendererSubtype{};
+        UINT32 rendererWidth = 0;
+        UINT32 rendererHeight = 0;
+        HRESULT hr = E_FAIL;
         std::uint64_t sessionId = 0;
         const wchar_t* startStage = L"validar seleccion";
         int deviceIndex = ComboBox_GetCurSel(videoCombo_);
@@ -3163,29 +4728,16 @@ private:
         if (deviceIndex < 0 || deviceIndex >= static_cast<int>(videoDevices_.size())) return E_INVALIDARG;
         if (modeIndex < 0 || modeIndex >= static_cast<int>(videoDevices_[deviceIndex].modes.size())) return E_INVALIDARG;
         activeMode_ = videoDevices_[deviceIndex].modes[modeIndex];
+        if (!ModeVisible(deviceIndex, activeMode_)) return MF_E_INVALIDMEDIATYPE;
         activeDeviceIndex_ = deviceIndex;
+        compressedMode_ = activeMode_.IsCompressed();
+        lastStartFailureDeterministic_ = false;
         const bool lowLatency = LowLatencySelected();
         activeLowLatency_.store(lowLatency);
         SaveSettings(deviceIndex, modeIndex);
 
         ShowSetup(false);
         if (GetForegroundWindow() == window_) SetFocus(window_);
-        startStage = L"inicializar renderer";
-        renderer_ = new D3DVideoRenderer();
-        HRESULT hr = renderer_->Initialize(window_, activeMode_.width, activeMode_.height,
-                                           activeMode_.subtype, lowLatency,
-                                           activeInputFullRange_.load());
-        if (FAILED(hr)) {
-            delete renderer_;
-            renderer_ = nullptr;
-            if (!recoveryAttempt) ShowSetup(true);
-            return hr;
-        }
-        if (activeDiscoMode_.load() && !pictureInPicture_) {
-            if (renderer_->SupportsDiscoMode()) renderer_->SetDiscoMode(true);
-            else activeDiscoMode_.store(false);
-        }
-
         sessionId = nextSessionId_.fetch_add(1) + 1;
         activeSession_.store(sessionId);
 
@@ -3193,28 +4745,102 @@ private:
         hr = ActivateVideoSource(deviceIndex);
         if (FAILED(hr)) goto failed;
 
-        startStage = L"crear atributos del Source Reader";
-        hr = MFCreateAttributes(&attributes, 4);
-        // Le pedimos baja latencia y prohibimos convertidores automaticos. Asi
-        // sabemos exactamente que formato viaja y no aparece una conversion CPU
-        // misteriosa entre la capturadora y nosotros.
-        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(kMfLowLatency, TRUE);
+        startStage = L"crear Source Reader";
         callback_ = new SourceReaderCallback(this, sessionId);
-        if (SUCCEEDED(hr)) hr = attributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback_);
-        if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
-        if (SUCCEEDED(hr)) hr = MFCreateSourceReaderFromMediaSource(mediaSource_, attributes, &newReader);
-        SafeRelease(attributes);
-        if (FAILED(hr)) goto failed;
-
-        startStage = L"aplicar modo de video";
-        hr = newReader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                           activeMode_.nativeIndex, &selectedType);
-        if (SUCCEEDED(hr)) {
-            hr = newReader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                                                nullptr, selectedType);
+        runtimeKey = RuntimeModeKey(deviceIndex, activeMode_);
+        softwareForced = softwareDecoderModes_.find(runtimeKey) != softwareDecoderModes_.end();
+        tryHardware = compressedMode_ && activeMode_.subtype == MFVideoFormat_H264 &&
+                      !softwareForced;
+        hr = CreateConfiguredReader(tryHardware, &newReader, startDecoded, startValidation);
+        if (FAILED(hr) && tryHardware) {
+            LogLine(L"Decoder H.264 por DXVA no disponible (%s); probando software",
+                    HrText(hr).c_str());
+            hr = CreateConfiguredReader(false, &newReader, startDecoded, startValidation);
         }
-        SafeRelease(selectedType);
         if (FAILED(hr)) goto failed;
+        decodeBackend_ = !compressedMode_ ? DecodeBackend::Raw
+            : (dxgiDeviceManager_ ? DecodeBackend::Hardware : DecodeBackend::Software);
+
+        if (compressedMode_ && activeMode_.subtype == MFVideoFormat_H264 &&
+            startValidation == FormatValidation::Valid && !startDecoded.apertureSpecified &&
+            (startDecoded.codedWidth != activeMode_.width ||
+             startDecoded.codedHeight != activeMode_.height)) {
+            // Antes del SPS algunos decoders solo conocen el tamaño codificado
+            // (por ejemplo 1088) y todavía no publican la aperture visible.
+            startValidation = FormatValidation::Unknown;
+        }
+
+        if (compressedMode_ && startValidation == FormatValidation::Invalid) {
+            hr = MF_E_INVALIDMEDIATYPE;
+            lastStartFailureDeterministic_ = true;
+            incompatibleModes_.insert(runtimeKey);
+            goto failed;
+        }
+        if (compressedMode_ && startValidation == FormatValidation::Valid &&
+            !DecodedFormatMatchesActiveMode(startDecoded)) {
+            LogLine(L"Decoder anuncio %ux%u visibles para modo %ux%u",
+                    startDecoded.visibleWidth, startDecoded.visibleHeight,
+                    activeMode_.width, activeMode_.height);
+            hr = MF_E_INVALIDMEDIATYPE;
+            lastStartFailureDeterministic_ = true;
+            incompatibleModes_.insert(runtimeKey);
+            goto failed;
+        }
+
+        startStage = L"inicializar renderer";
+        rendererSubtype = compressedMode_ ? startDecoded.subtype : activeMode_.subtype;
+        rendererWidth = compressedMode_ && startValidation == FormatValidation::Valid
+            ? startDecoded.visibleWidth : activeMode_.width;
+        rendererHeight = compressedMode_ && startValidation == FormatValidation::Valid
+            ? startDecoded.visibleHeight : activeMode_.height;
+        rendererInputSubtype_ = rendererSubtype;
+        renderer_ = new D3DVideoRenderer();
+        frameGenerationFallbackNotice_ = false;
+        activeFrameGenerationMode_ = SelectedFrameGenerationMode();
+        hr = renderer_->Initialize(window_, rendererWidth, rendererHeight,
+                                   rendererSubtype, lowLatency,
+                                   activeInputFullRange_.load(),
+                                   activeFrameGenerationMode_, activeMode_.Fps());
+        if (FAILED(hr)) goto failed;
+        if (activeFrameGenerationMode_ != FrameGenerationMode::Off) {
+            if (renderer_->FrameGenerationActive()) {
+                if (renderer_->FrameGenerationUsesAmdFrcBackend()) {
+                    LogLine(L"AMD AMF FRC activo: perfil=%d, multiplicador=2x, future-frame=0",
+                            FrameGenerationAmdFrcProfile(activeFrameGenerationMode_));
+                } else if (renderer_->FrameGenerationUsesVfgBackend()) {
+                    LogLine(L"NVIDIA VFG activo: modelo=%u, multiplicador=2x, t=0.5",
+                            FrameGenerationVfgModel(activeFrameGenerationMode_));
+                } else {
+                    LogLine(L"NVIDIA OFA Frame Generation activo: modo=%u, rejilla=%dx%d, costos=%s, Dayaah Line Cleaner=%s",
+                            static_cast<unsigned>(activeFrameGenerationMode_),
+                            renderer_->FrameGenerationGrid(), renderer_->FrameGenerationGrid(),
+                            renderer_->FrameGenerationUsesCostMap() ? L"si" : L"no",
+                            renderer_->FrameGenerationLineCleanerLevel() > 0
+                                ? (renderer_->FrameGenerationLineCleanerLevel() > 1 ? L"calidad" : L"equilibrado")
+                                : L"apagado");
+                }
+            } else {
+                LogLine(L"Frame Generation no disponible; captura normal: %s",
+                        renderer_->FrameGenerationError().c_str());
+                frameGenerationFallbackNotice_ = true;
+                activeFrameGenerationMode_ = FrameGenerationMode::Off;
+            }
+        }
+        if (renderer_->FrameGenerationActive()) {
+            VideoEffects runtimeEffects = effectsSettings_;
+            runtimeEffects.enabled = false;
+            effectsPacked_.store(runtimeEffects.Pack(), std::memory_order_relaxed);
+            renderer_->SetDiscoMode(false);
+        } else {
+            VideoEffects runtimeEffects = effectsSettings_;
+            runtimeEffects.enabled = ShouldApplyVisualEffects(
+                effectsSettings_.enabled, pictureInPicture_);
+            effectsPacked_.store(runtimeEffects.Pack(), std::memory_order_relaxed);
+            if (activeDiscoMode_.load() && !pictureInPicture_) {
+                if (renderer_->SupportsDiscoMode()) renderer_->SetDiscoMode(true);
+                else activeDiscoMode_.store(false);
+            }
+        }
 
         startStage = L"crear eventos de captura";
         flushEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -3238,16 +4864,28 @@ private:
         presentedFps_ = 0;
         lastReceivedFpsFrames_ = 0;
         lastPresentedFpsFrames_ = 0;
-        lastFrameArrivalTick_.store(GetTickCount64());
+        captureStartedTick_.store(GetTickCount64());
+        lastSampleArrivalTick_.store(0);
+        lastFrameArrivalTick_.store(0);
+        consecutiveInvalidSamples_.store(0);
+        decodedFormatValidated_.store(false);
+        {
+            ExclusiveSrwGuard guard(sampleLock_);
+            decodedFormat_ = startDecoded;
+            decodedFormatValidation_ = startValidation;
+        }
         lastProcessingDurationMs_.store(0.0);
         lastPresentDurationMs_.store(0.0);
+        lastOpticalFlowDurationMs_.store(0.0);
         EnterCriticalSection(&frameLock_);
         framePacing_.Reset();
         framePending_ = false;
-        latestFrameArrivalTick_ = lastFrameArrivalTick_.load();
+        latestFrameArrivalTick_ = captureStartedTick_.load();
         renderFrameArrivalTick_ = latestFrameArrivalTick_;
         latestFrameStride_ = 0;
         renderFrameStride_ = 0;
+        latestFrameDescriptor_ = {};
+        renderFrameDescriptor_ = {};
         LeaveCriticalSection(&frameLock_);
         running_.store(true);
         cadenceWarningShown_ = false;
@@ -3269,19 +4907,47 @@ private:
             }
         }
 
-        LogLine(L"Captura iniciada: %s, %s",
-                videoDevices_[deviceIndex].name.c_str(), activeMode_.Label().c_str());
+        LogLine(L"Captura iniciada: %s, %s, ruta=%s",
+                videoDevices_[deviceIndex].name.c_str(), activeMode_.Label().c_str(),
+                decodeBackend_ == DecodeBackend::Raw ? L"cruda" :
+                (decodeBackend_ == DecodeBackend::Hardware ? L"decoder DXVA" : L"decoder software"));
         startStage = L"pedir primer frame";
         hr = ContinueReading(sessionId);
         if (FAILED(hr)) goto failed;
         MarkFirstRunComplete();
+        if (renderer_ && renderer_->FrameGenerationActive()) {
+            ShowViewerNotice(renderer_->FrameGenerationUsesAmdFrcBackend()
+                ? Tr(language_,
+                    L"AMD AMF FRC 2x activo · efectos pausados",
+                    L"AMD AMF FRC 2x active · effects paused")
+                : renderer_->FrameGenerationUsesVfgBackend()
+                    ? Tr(language_,
+                        L"NVIDIA VFG 2x activo · efectos pausados",
+                        L"NVIDIA VFG 2x active · effects paused")
+                    : Tr(language_,
+                        L"NVIDIA OFA Frame Generation 2x activo · efectos pausados",
+                        L"NVIDIA OFA 2x Frame Generation active · effects paused"), 5200);
+        } else if (frameGenerationFallbackNotice_) {
+            ShowViewerNotice(Tr(language_,
+                L"Frame Generation no está disponible; se usa la ruta normal.",
+                L"Frame Generation is unavailable; using the normal path."),
+                6500);
+        }
         return S_OK;
 
     failed:
         SafeRelease(newReader);
         LogLine(L"Fallo al iniciar en '%s': %s", startStage, HrText(hr).c_str());
         StopCapture();
-        if (!recoveryAttempt) ShowSetup(true);
+        if (!recoveryAttempt) {
+            if (lastStartFailureDeterministic_ && deviceIndex >= 0 &&
+                deviceIndex < static_cast<int>(videoDevices_.size())) {
+                ComboBox_SetCurSel(videoCombo_, deviceIndex);
+                PopulateModeSelectors(deviceIndex, -1);
+                UpdateSetupAvailability();
+            }
+            ShowSetup(true);
+        }
         return hr;
     }
 
@@ -3355,6 +5021,7 @@ private:
             }
         }
         SafeRelease(mediaSource_);
+        ReleaseDecoderAcceleration();
         activeDeviceIndex_ = -1;
         activeSession_.store(0);
         if (callback_) {
@@ -3372,11 +5039,25 @@ private:
         latestFrame_.clear();
         renderFrame_.clear();
         framePending_ = false;
+        latestFrameDescriptor_ = {};
+        renderFrameDescriptor_ = {};
         LeaveCriticalSection(&frameLock_);
         {
             ExclusiveSrwGuard guard(sampleLock_);
             captureFrame_.clear();
             captureI420Native_.clear();
+            captureNative_.clear();
+            decodedFormat_ = {};
+            decodedFormatValidation_ = FormatValidation::Unknown;
+        }
+        compressedMode_ = false;
+        rendererInputSubtype_ = {};
+        decodedFormatValidated_.store(false);
+        consecutiveInvalidSamples_.store(0);
+        {
+            ExclusiveSrwGuard guard(failureLock_);
+            pendingFailure_.reset();
+            failureMessagePosted_ = false;
         }
         SetWindowTextW(window_, kAppTitle);
         lastCaptureStopTick_ = GetTickCount64();
@@ -3392,6 +5073,10 @@ private:
         // El timeout de 16 ms existe para animar avisos aunque la señal se quede
         // quieta; si no hay animacion, vuelve a dormir.
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        FrameGenTelemetry frameGenTelemetry;
+        const bool frameGenTelemetryOn = FrameGenEnvFlag(L"DAYAAH_FG_TELEMETRY") ||
+                                         FrameGenBypassUsesStableFlow(FrameGenBypassMode());
+        frameGenTelemetry.Reset(GetTickCount64(), discardedFrames_.load());
         HANDLE events[] = {renderStopEvent_, resizeEvent_, frameReadyEvent_};
         for (;;) {
             const DWORD wait = WaitForMultipleObjects(_countof(events), events, FALSE, 16);
@@ -3427,6 +5112,7 @@ private:
                 latestFrame_.swap(renderFrame_);
                 renderFrameArrivalTick_ = latestFrameArrivalTick_;
                 renderFrameStride_ = latestFrameStride_;
+                renderFrameDescriptor_ = latestFrameDescriptor_;
                 framePending_ = false;
                 haveFrame = true;
                 newFrame = true;
@@ -3441,6 +5127,7 @@ private:
                 latestFrame_.swap(renderFrame_);
                 renderFrameArrivalTick_ = latestFrameArrivalTick_;
                 renderFrameStride_ = latestFrameStride_;
+                renderFrameDescriptor_ = latestFrameDescriptor_;
                 framePending_ = false;
                 discardedFrames_++;
                 governorDiscardedFrames_++;
@@ -3457,10 +5144,22 @@ private:
             stats.receivedFps = receivedFps_.load();
             stats.presentedFps = presentedFps_.load();
             stats.lastFrameAgeMs = GetTickCount64() - renderFrameArrivalTick_;
-            stats.width = activeMode_.width;
-            stats.height = activeMode_.height;
+            stats.width = renderFrameDescriptor_.width ? renderFrameDescriptor_.width : activeMode_.width;
+            stats.height = renderFrameDescriptor_.height ? renderFrameDescriptor_.height : activeMode_.height;
             stats.sourceFps = activeMode_.Fps();
             stats.format = GuidFormatName(activeMode_.subtype);
+            if (renderFrameDescriptor_.compressed) {
+                stats.format += L" → " + GuidFormatName(renderFrameDescriptor_.rendererSubtype);
+            }
+            stats.compressedPath = renderFrameDescriptor_.compressed;
+            stats.frameGeneration = renderer_->FrameGenerationActive();
+            stats.opticalFlowMs = lastOpticalFlowDurationMs_.load();
+            if (stats.frameGeneration) {
+                stats.format += renderer_->FrameGenerationUsesAmdFrcBackend()
+                    ? L" · AMD AMF FRC 2x"
+                    : (renderer_->FrameGenerationUsesVfgBackend()
+                        ? L" · NVIDIA VFG 2x" : L" · NVIDIA OFA FG 2x");
+            }
             stats.lowLatency = activeLowLatency_.load();
             stats.processingMs = lastProcessingDurationMs_.load();
             stats.presentMs = lastPresentDurationMs_.load();
@@ -3476,6 +5175,12 @@ private:
             stats.approximateLatencyMs = EstimateViewerLatencyMs(
                 stats.sourceFps, stats.lastFrameAgeMs,
                 lastPresentDurationMs_.load(), stats.lowLatency);
+            if (stats.frameGeneration && stats.sourceFps > 1.0) {
+                // El frame inventado necesita conocer el siguiente frame real.
+                // Este intervalo es una estimacion honesta de ese costo extra.
+                stats.approximateLatencyMs += static_cast<int>(
+                    std::lround(1000.0 / stats.sourceFps));
+            }
             stats.english = language_ == AppLanguage::English;
             const auto notice = std::atomic_load(&viewerNotice_);
             if (notice) {
@@ -3487,17 +5192,45 @@ private:
                 }
             }
             RenderTiming timing{};
-            const HRESULT hr = renderer_->Render(renderFrame_.data(), renderFrame_.size(), renderFrameStride_,
+            const HRESULT hr = renderer_->Render(renderFrame_.data(), renderFrame_.size(),
+                                                 renderFrameDescriptor_.stride ? renderFrameDescriptor_.stride
+                                                                               : renderFrameStride_,
                                                  std::atomic_load(&overlayConfig_), stats,
                                                  VideoEffects::Unpack(effectsPacked_.load(std::memory_order_relaxed)),
-                                                 latencyHudEnabled_.load(), &timing);
+                                                 newFrame, latencyHudEnabled_.load(), &timing);
             if (SUCCEEDED(hr)) {
                 lastProcessingDurationMs_.store(timing.processingMs);
                 lastPresentDurationMs_.store(timing.presentMs);
-                if (newFrame) renderedFrames_++;
+                lastOpticalFlowDurationMs_.store(timing.opticalFlowMs);
+                // OJO: esto cuenta llamadas a Present, no cuadros distintos vistos. Con FG
+                // son 2 por frame fuente aunque la pantalla pise o repita alguno; los
+                // numeros reales salen de DAYAAH_FG_TELEMETRY (presents vistos, vblanks).
+                if (newFrame) renderedFrames_.fetch_add(timing.presents);
+                if (frameGenTelemetryOn && newFrame) frameGenTelemetry.Add(timing.fg);
             }
             else if (hr != DXGI_STATUS_OCCLUDED) {
                 LogLine(L"Present fallo: %s", HrText(hr).c_str());
+            }
+
+            if (frameGenTelemetryOn) {
+                const ULONGLONG nowMs = GetTickCount64();
+                if (frameGenTelemetry.Due(nowMs)) {
+                    if (renderer_ && renderer_->FrameGenerationActive()) {
+                        const double sourceFps = activeMode_.Fps();
+                        std::wstring pacingLine;
+                        std::wstring flowLine;
+                        frameGenTelemetry.Report(nowMs, discardedFrames_.load(),
+                                                 sourceFps > 1.0 ? 1000.0 / sourceFps : 16.6667,
+                                                 pacingLine, flowLine);
+                        LogLine(L"%s", pacingLine.c_str());
+                        LogLine(L"%s", flowLine.c_str());
+                        const std::wstring& diagnostic =
+                            renderer_->FrameGenerationFlowDiagnosticLine();
+                        if (!diagnostic.empty()) LogLine(L"%s", diagnostic.c_str());
+                    } else {
+                        frameGenTelemetry.Reset(nowMs, discardedFrames_.load());
+                    }
+                }
             }
         }
         return 0;
@@ -3506,8 +5239,10 @@ private:
     void ShowSetup(bool show) {
         if (show && pictureInPicture_) ExitPictureInPicture(false);
         capturingUi_ = !show;
-        HWND controls[] = {videoCombo_, resolutionCombo_, fpsCombo_, formatCombo_, formatNotice_,
-                           audioCombo_, gainCombo_, syncCombo_, languageCombo_, autoTuneButton_, startButton_,
+        HWND controls[] = {videoCombo_, rescanButton_, compressedCheck_, compressedLabel_,
+                           resolutionCombo_, fpsCombo_, formatCombo_, formatNotice_,
+                           audioCombo_, gainCombo_, syncCombo_, frameGenerationCombo_,
+                           languageCombo_, autoTuneButton_, startButton_,
                            statusText_, kofiLink_, githubLink_};
         for (HWND control : controls) ShowWindow(control, show ? SW_SHOW : SW_HIDE);
         if (show) {
@@ -3533,12 +5268,18 @@ private:
         wchar_t title[240]{};
         _snwprintf_s(title, _countof(title), _TRUNCATE,
                      language_ == AppLanguage::English
-                        ? L"Dayaah Capture 2.2.0  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s"
-                        : L"Dayaah Capture 2.2.0  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s",
+                        ? L"Dayaah Capture 3.4.1  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s%s"
+                        : L"Dayaah Capture 3.4.1  -  %llu fps  -  %ux%u %.2f Hz %s  -  Audio %s%s%s",
                      presented, activeMode_.width, activeMode_.height, activeMode_.Fps(),
                      GuidFormatName(activeMode_.subtype).c_str(),
                      audio_.IsMuted() ? L"MUTE" : L"ON",
-                     activeDiscoMode_.load() ? L"  -  DISCO RGB" : L"");
+                     activeDiscoMode_.load() ? L"  -  DISCO RGB" : L"",
+                     renderer_ && renderer_->FrameGenerationActive()
+                        ? (renderer_->FrameGenerationUsesAmdFrcBackend()
+                            ? L"  -  AMD AMF FRC 2x"
+                            : (renderer_->FrameGenerationUsesVfgBackend()
+                                ? L"  -  NVIDIA VFG 2x" : L"  -  NVIDIA OFA FG 2x"))
+                        : L"");
         SetWindowTextW(window_, title);
     }
 
@@ -3723,7 +5464,8 @@ private:
                      SWP_NOOWNERZORDER | SWP_SHOWWINDOW);
 
         effectsPacked_.store(effectsSettings_.Pack(), std::memory_order_relaxed);
-        if (renderer_ && activeDiscoMode_.load() && renderer_->SupportsDiscoMode()) {
+        if (renderer_ && activeDiscoMode_.load() && renderer_->SupportsDiscoMode() &&
+            !renderer_->FrameGenerationActive()) {
             renderer_->SetDiscoMode(true);
         }
         UpdateFpsTitle();
@@ -3744,6 +5486,10 @@ private:
     void TogglePictureInPicture() {
         if (pictureInPicture_) ExitPictureInPicture();
         else EnterPictureInPicture();
+    }
+
+    bool VisualEffectsPaused() const {
+        return pictureInPicture_ || (renderer_ && renderer_->FrameGenerationActive());
     }
 
     void ReleaseDevices() {
@@ -3805,6 +5551,10 @@ private:
         WritePrivateProfileStringW(L"capture", L"input_full_range",
                                    activeInputFullRange_.load() ? L"1" : L"0",
                                    path.c_str());
+        const std::wstring frameGeneration = std::to_wstring(
+            static_cast<unsigned>(SelectedFrameGenerationMode()));
+        WritePrivateProfileStringW(L"capture", L"frame_generation",
+                                   frameGeneration.c_str(), path.c_str());
     }
 
     // ----- Ventana y controles de Configuracion -----
@@ -3815,9 +5565,13 @@ private:
     HWND fpsCombo_ = nullptr;
     HWND formatCombo_ = nullptr;
     HWND formatNotice_ = nullptr;
+    HWND rescanButton_ = nullptr;
+    HWND compressedCheck_ = nullptr;
+    HWND compressedLabel_ = nullptr;
     HWND audioCombo_ = nullptr;
     HWND gainCombo_ = nullptr;
     HWND syncCombo_ = nullptr;
+    HWND frameGenerationCombo_ = nullptr;
     HWND languageCombo_ = nullptr;
     HWND autoTuneButton_ = nullptr;
     HWND startButton_ = nullptr;
@@ -3839,11 +5593,23 @@ private:
     std::vector<std::pair<UINT32, UINT32>> setupResolutions_;
     std::vector<double> setupFps_;
     std::vector<GUID> setupFormats_;
+    bool allowCompressed_ = false;
+    std::unordered_set<std::wstring> incompatibleModes_;
+    std::unordered_set<std::wstring> softwareDecoderModes_;
     VideoMode activeMode_{};
+    FrameGenerationMode activeFrameGenerationMode_ = FrameGenerationMode::Off;
     int activeDeviceIndex_ = -1;
     D3DVideoRenderer* renderer_ = nullptr;
     AudioBridge audio_;
     IMFMediaSource* mediaSource_ = nullptr;
+    ID3D11Device* decoderDevice_ = nullptr;
+    IMFDXGIDeviceManager* dxgiDeviceManager_ = nullptr;
+    UINT dxgiResetToken_ = 0;
+    DecodeBackend decodeBackend_ = DecodeBackend::Raw;
+    GUID rendererInputSubtype_{};
+    bool compressedMode_ = false;
+    bool frameGenerationFallbackNotice_ = false;
+    bool lastStartFailureDeterministic_ = false;
     SRWLOCK readerLock_ = SRWLOCK_INIT;
     IMFSourceReader* reader_ = nullptr;
     SourceReaderCallback* callback_ = nullptr;
@@ -3856,10 +5622,19 @@ private:
     // pequeño es completamente a proposito.
     std::atomic<bool> running_{false};
     std::atomic<HRESULT> captureError_{S_OK};
+    std::atomic<std::uint64_t> captureErrorSession_{0};
     SRWLOCK sampleLock_ = SRWLOCK_INIT;
+    SRWLOCK failureLock_ = SRWLOCK_INIT;
+    std::optional<PendingCaptureFailure> pendingFailure_;
+    bool failureMessagePosted_ = false;
+    DecodedFormat decodedFormat_{};
+    FormatValidation decodedFormatValidation_ = FormatValidation::Unknown;
+    std::atomic<bool> decodedFormatValidated_{false};
+    std::atomic<unsigned> consecutiveInvalidSamples_{0};
     CRITICAL_SECTION frameLock_{};
     std::vector<BYTE> captureFrame_;
     std::vector<BYTE> captureI420Native_;
+    std::vector<BYTE> captureNative_;
     std::vector<BYTE> latestFrame_;
     std::vector<BYTE> renderFrame_;
     bool framePending_ = false;
@@ -3876,14 +5651,19 @@ private:
     std::atomic<ULONGLONG> receivedFps_{0};
     std::atomic<ULONGLONG> presentedFps_{0};
     std::atomic<ULONGLONG> lastFrameArrivalTick_{0};
+    std::atomic<ULONGLONG> lastSampleArrivalTick_{0};
+    std::atomic<ULONGLONG> captureStartedTick_{0};
     ULONGLONG latestFrameArrivalTick_ = 0;
     ULONGLONG renderFrameArrivalTick_ = 0;
     LONG latestFrameStride_ = 0;
     LONG renderFrameStride_ = 0;
+    PublishedFrameDescriptor latestFrameDescriptor_{};
+    PublishedFrameDescriptor renderFrameDescriptor_{};
     FramePacingTracker framePacing_;
     std::atomic<ULONGLONG> governorDiscardedFrames_{0};
     std::atomic<double> lastProcessingDurationMs_{0.0};
     std::atomic<double> lastPresentDurationMs_{0.0};
+    std::atomic<double> lastOpticalFlowDurationMs_{0.0};
     std::atomic<bool> activeLowLatency_{true};
     std::atomic<bool> activeInputFullRange_{false};
     std::atomic<bool> activeDiscoMode_{false};
@@ -3966,10 +5746,19 @@ STDMETHODIMP SourceReaderCallback::OnReadSample(HRESULT status, DWORD, DWORD str
         return S_OK;
     }
     if (streamFlags & (MF_SOURCE_READERF_ENDOFSTREAM |
-                       MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED |
-                       MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED)) {
+                       MF_SOURCE_READERF_NATIVEMEDIATYPECHANGED)) {
         app->ReaderError(sessionId_, MF_E_TRANSFORM_STREAM_CHANGE);
         return S_OK;
+    }
+    if (streamFlags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+        const MediaTypeChangeAction action = app->HandleCurrentMediaTypeChanged(sessionId_);
+        if (action == MediaTypeChangeAction::Phoenix) {
+            app->ReaderError(sessionId_, MF_E_TRANSFORM_STREAM_CHANGE);
+            return S_OK;
+        }
+        if (action == MediaTypeChangeAction::Stop) return S_OK;
+        // El flag puede venir acompañado por un sample válido. El formato ya
+        // está actualizado, así que lo procesamos antes de pedir el siguiente.
     }
     if (sample) app->OnVideoSample(sessionId_, sample, timestamp);
     const HRESULT readHr = app->ContinueReading(sessionId_);
@@ -4030,7 +5819,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         LogLine(L"---------------- reinicio interno ----------------");
         LogLine(L"Esperando al proceso anterior: PID %lu", waitForProcess);
     }
-    LogLine(L"Dayaah Capture 2.2.0 iniciando");
+    LogLine(L"Dayaah Capture 3.4.1 iniciando (2.2.0 sigue siendo la estable)");
     if (phoenixFailureProvided) {
         LogLine(L"Motivo del reinicio Phoenix: --phoenix-failed=0x%08lX",
                 static_cast<unsigned long>(phoenixFailure));

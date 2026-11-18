@@ -34,4 +34,3 @@ trap 'rm -f "$dayaah_resource_object"' EXIT
     -ld2d1 -ldwrite -lwindowscodecs -lgdi32 -luser32
 
 echo "Dayaah Capture built at $dayaah_project_root/build/DayaahCapture.exe"
-sha256sum "$dayaah_project_root/build/DayaahCapture.exe"
