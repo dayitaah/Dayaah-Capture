@@ -282,7 +282,7 @@ template <typename T> inline bool GetNumber(const std::string& object, const cha
     long double number = 0;
     if (!(input >> number) || !std::isfinite(number) ||
         number < static_cast<long double>(std::numeric_limits<T>::lowest()) ||
-        number > static_cast<long double>(std::numeric_limits<T>::max())) return false;
+        number > static_cast<long double>((std::numeric_limits<T>::max)())) return false;
     if (std::numeric_limits<T>::is_integer && std::floor(number) != number) return false;
     value = static_cast<T>(number);
     return true;
