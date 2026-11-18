@@ -34,7 +34,7 @@ La versión estable recomendada sigue siendo **2.2.0**.
   conserva la selección NVIDIA para OFA/VFG.
 - Añadidos los encabezados oficiales AMF 1.5.3 bajo su licencia MIT y pruebas
   de persistencia/mapeo para los nuevos modos.
-- Corregido NVIDIA VFG en la RTX 5070: sus texturas D3D11 ahora son RGBA8 de
+- Corregido NVIDIA VFG, sus texturas D3D11 ahora son RGBA8 de
   punta a punta, evitando el fallo `NvCVImage_Transfer -9` causado por intentar
   regresar la salida CUDA RGBA8 a una superficie BGRA8 no admitida.
 
@@ -73,7 +73,7 @@ La versión estable recomendada sigue siendo **2.2.0**.
 La versión estable recomendada sigue siendo **2.2.0**.
 
 - Eliminado el crossfade temporal entre fallback y warp que suavizaba los
-  frames generados y hacía parpadear cabello, espada y detalles finos al
+  frames generados y hacía parpadear cabello y detalles finos al
   alternarlos con los frames reales en una conversión 30→60.
 - Las proyecciones forward/backward solo se promedian cuando su color coincide.
   Si discrepan, gana la de costo OFA claramente menor; los empates prefieren el
@@ -289,13 +289,11 @@ Esta es la única actualización acumulativa después de 2.0.1; no hay entradas
   manejo de falta de memoria y limpieza de formatos de texto durante resize.
 - Mejorado el log UTF-8, eliminado un lock de audio sin uso y enlazado el
   runtime estático de MSVC mediante `/MT`.
-- Añadida compilación reproducible con LLVM-MinGW/UCRT y comentarios en español.
 
 ## 2.0.1 — 2026-10-04
 
 - Corregido **Configuración**: ahora reinicia el proceso en modo configuración
   para cerrar definitivamente captura, audio, render e imagen residual.
-- Añadidas tarjetas gráficas clicables de Ko-fi y GitHub.
 
 ## 2.0.0 — 2026-10-04
 
@@ -345,7 +343,6 @@ Nitidez adaptativa original, controles SDR y CRT ligero. F6 compara con el origi
 - Activación global de overlays desde el menú contextual o con `F10`.
 - Guardado automático del overlay, restauración al iniciar y carga corregida de perfiles con texto.
 - Opacidad/tamaño al escribir y cierre del editor con retorno del foco a la captura.
-- Conserva la base 1.1.3 y todavía no añade shaders.
 
 ## Versión 1.1.3
 
