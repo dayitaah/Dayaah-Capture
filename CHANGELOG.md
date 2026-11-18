@@ -34,7 +34,7 @@ The recommended stable release remains **2.2.0**.
   explicit NVIDIA adapter selection for OFA/VFG.
 - Bundled the official AMF 1.5.3 interface headers under their MIT license and
   extended mode-persistence/mapping tests for the new backend.
-- Fixed NVIDIA VFG on the RTX 5070 by keeping its D3D11 textures RGBA8 end to
+- Fixed NVIDIA VFG by keeping its D3D11 textures RGBA8 end to
   end, avoiding `NvCVImage_Transfer -9` when copying CUDA RGBA8 output into an
   unsupported BGRA8 destination.
 
@@ -73,7 +73,7 @@ The recommended stable release remains **2.2.0**.
 The recommended stable release remains **2.2.0**.
 
 - Removed the temporal crossfade between fallback and warp that softened
-  generated frames and made hair, the sword and fine detail flicker when
+  generated frames and made hair and fine detail flicker when
   alternating with real frames during 30→60 conversion.
 - Forward/backward projections are averaged only when their colors agree. When
   they disagree, the projection with clearly lower OFA cost wins; ties prefer
@@ -288,13 +288,11 @@ entries to follow.
   handled allocation failure, and cleared resize-dependent text formats.
 - Hardened UTF-8 logging, removed an unused audio lock and linked the MSVC
   build to the static runtime with `/MT`.
-- Added a reproducible LLVM-MinGW/UCRT build and Spanish source comments.
 
 ## 2.0.1 — 2026-10-04
 
 - Fixed **Settings** by restarting into setup, fully terminating capture,
   audio, rendering and the residual final frame.
-- Added clickable Ko-fi and GitHub graphic cards.
 
 ## 2.0.0 — 2026-10-04
 
@@ -344,7 +342,6 @@ Adaptive sharpening, SDR color and lightweight CRT shaders; F6 bypass, F7 panel,
 - Global overlay toggle in the context menu or with `F10`.
 - Automatic overlay save/restore and corrected loading of profiles containing text.
 - Live opacity/size input and editor close that returns focus to capture.
-- Preserves the 1.1.3 base and intentionally does not add shaders yet.
 
 ## Version 1.1.3
 
